@@ -183,21 +183,22 @@ TRANSLATIONS = {
         "ed_status_reset": "Đã đặt lại các cấu hình về giá trị mặc định.",
         "pri_none": "Không",
         "pri_idle": "Nghỉ",
-        "pri_below_normal": "Dưới chuẩn",
-        "pri_normal": "Bình thường",
-        "pri_above_normal": "Trên chuẩn",
+        "pri_below_normal": "Dưới Bình Thường",
+        "pri_normal": "Bình Thường",
+        "pri_above_normal": "Trên Bình Thường",
         "pri_high": "Cao",
-        "pri_realtime": "Thời gian thực",
+        "pri_realtime": "Thời Gian Thực",
         "io_none": "Không",
         "io_very_low": "Rất thấp",
         "io_low": "Thấp",
-        "io_normal": "Bình thường",
+        "io_normal": "Bình Thường",
         "io_high": "Cao",
         "mem_none": "Không",
-        "mem_very_low": "Rất thấp (1)",
-        "mem_low": "Thấp (2)",
-        "mem_medium": "Trung bình (3)",
-        "mem_normal": "Bình thường (5)",
+        "mem_very_low": "Rất thấp",
+        "mem_low": "Thấp",
+        "mem_medium": "Trung Bình",
+        "mem_below_normal": "Dưới Bình Thường",
+        "mem_normal": "Bình Thường",
         "aff_none": "Không",
     },
     "en": {
@@ -335,10 +336,11 @@ TRANSLATIONS = {
         "io_normal": "Normal",
         "io_high": "High",
         "mem_none": "None",
-        "mem_very_low": "Very Low (1)",
-        "mem_low": "Low (2)",
-        "mem_medium": "Medium (3)",
-        "mem_normal": "Normal (5)",
+        "mem_very_low": "Very Low",
+        "mem_low": "Low",
+        "mem_medium": "Medium",
+        "mem_below_normal": "Below Normal",
+        "mem_normal": "Normal",
         "aff_none": "None",
     }
 }
@@ -352,6 +354,7 @@ _VALUE_TRANSLATION_MAP = {
     "Realtime": "pri_realtime",
     "Very Low": "io_very_low",
     "Low": "io_low",
+    "Medium": "mem_medium",
     "all": "ed_btn_all_cores",
 }
 
@@ -456,7 +459,7 @@ def validate_rules(data) -> tuple[dict, list[str]]:
         if "memory_priority" in rule:
             try:
                 val = int(rule["memory_priority"])
-                if val in (1, 2, 3, 5):
+                if val in (1, 2, 3, 4, 5):
                     clean["memory_priority"] = val
             except (TypeError, ValueError):
                 pass
@@ -555,9 +558,38 @@ def translate_val(val: str, category: str = "") -> str:
     if not isinstance(val, str):
         return str(val) if val is not None else ""
     if category == "io":
+        if val == "Very Low":
+            return tr("io_very_low")
+        if val == "Low":
+            return tr("io_low")
         if val == "Normal":
             return tr("io_normal")
         if val == "High":
             return tr("io_high")
+    elif category == "cpu":
+        if val == "Idle":
+            return tr("pri_idle")
+        if val == "Below Normal":
+            return tr("pri_below_normal")
+        if val == "Normal":
+            return tr("pri_normal")
+        if val == "Above Normal":
+            return tr("pri_above_normal")
+        if val == "High":
+            return tr("pri_high")
+        if val == "Realtime":
+            return tr("pri_realtime")
+    elif category in ("mem", "memory"):
+        if val in ("Very Low", "1"):
+            return tr("mem_very_low")
+        if val in ("Low", "2"):
+            return tr("mem_low")
+        if val in ("Medium", "3"):
+            return tr("mem_medium")
+        if val in ("Below Normal", "4"):
+            return tr("mem_below_normal")
+        if val in ("Normal", "5"):
+            return tr("mem_normal")
     key = _VALUE_TRANSLATION_MAP.get(val)
     return tr(key) if key else val
+

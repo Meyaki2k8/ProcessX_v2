@@ -36,16 +36,14 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_SET_LIMITED_INFORMATION = 0x2000
 PROCESS_ALL_ACCESS = 0x1F0FFF
 
-# Win32 Process Image Name Prototype
+# Win32 Process Image Name Prototype & Core Libraries
 _kernel32 = ctypes.windll.kernel32
-_QueryFullProcessImageNameW = _kernel32.QueryFullProcessImageNameW
-_QueryFullProcessImageNameW.argtypes = [
-    ctypes.wintypes.HANDLE,
-    ctypes.wintypes.DWORD,
-    ctypes.wintypes.LPWSTR,
-    ctypes.POINTER(ctypes.wintypes.DWORD),
-]
-_QueryFullProcessImageNameW.restype = ctypes.wintypes.BOOL
+_user32 = ctypes.windll.user32
+_advapi32 = ctypes.windll.advapi32
+_ntdll = ctypes.windll.ntdll
+_psapi = getattr(ctypes.windll, "psapi", None)
+_powrprof = getattr(ctypes.windll, "powrprof", None)
+_dwmapi = getattr(ctypes.windll, "dwmapi", None)
 
 # NT Process Information Classes
 ProcessMemoryPriority = 0
@@ -65,16 +63,6 @@ DWMWCP_ROUND = 2
 
 # Power Plan GUID regex
 _GUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
-
-# NT API Prototypes
-_ntdll = ctypes.windll.ntdll
-_NtSIP = _ntdll.NtSetInformationProcess
-_NtSIP.restype = ctypes.c_long
-_NtSIP.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong]
-
-_NtQIP = _ntdll.NtQueryInformationProcess
-_NtQIP.restype = ctypes.c_long
-_NtQIP.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p]
 
 # Structures
 class MEMORY_PRIORITY_INFORMATION(ctypes.Structure):
@@ -110,6 +98,204 @@ class WIN32_GUID(ctypes.Structure):
         return str(uuid.UUID(bytes_le=bytes(self)))
 
 
+# ── Full 64-bit ctypes prototypes to eliminate 0xC0000005 and handle leaks ──
+_kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+_kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+
+_kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+_kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
+
+_kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
+_kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+
+_kernel32.GetCurrentProcess.argtypes = []
+_kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
+
+_kernel32.GetLastError.argtypes = []
+_kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+
+_kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+_kernel32.LocalFree.restype = ctypes.c_void_p
+
+_kernel32.TerminateProcess.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.UINT]
+_kernel32.TerminateProcess.restype = ctypes.wintypes.BOOL
+
+_QueryFullProcessImageNameW = _kernel32.QueryFullProcessImageNameW
+_QueryFullProcessImageNameW.argtypes = [
+    ctypes.wintypes.HANDLE,
+    ctypes.wintypes.DWORD,
+    ctypes.wintypes.LPWSTR,
+    ctypes.POINTER(ctypes.wintypes.DWORD),
+]
+_QueryFullProcessImageNameW.restype = ctypes.wintypes.BOOL
+
+if hasattr(_kernel32, "SetProcessDefaultCpuSets"):
+    _kernel32.SetProcessDefaultCpuSets.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_void_p, ctypes.wintypes.ULONG]
+    _kernel32.SetProcessDefaultCpuSets.restype = ctypes.wintypes.BOOL
+
+if hasattr(_kernel32, "GetProcessDefaultCpuSets"):
+    _kernel32.GetProcessDefaultCpuSets.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.c_void_p,
+        ctypes.wintypes.ULONG,
+        ctypes.POINTER(ctypes.wintypes.ULONG),
+    ]
+    _kernel32.GetProcessDefaultCpuSets.restype = ctypes.wintypes.BOOL
+
+if hasattr(_kernel32, "GetSystemCpuSetInformation"):
+    _kernel32.GetSystemCpuSetInformation.argtypes = [
+        ctypes.c_void_p,
+        ctypes.wintypes.ULONG,
+        ctypes.POINTER(ctypes.wintypes.ULONG),
+        ctypes.wintypes.HANDLE,
+        ctypes.wintypes.ULONG,
+    ]
+    _kernel32.GetSystemCpuSetInformation.restype = ctypes.wintypes.BOOL
+
+if hasattr(_kernel32, "GetProcessInformation"):
+    _kernel32.GetProcessInformation.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.wintypes.DWORD,
+    ]
+    _kernel32.GetProcessInformation.restype = ctypes.wintypes.BOOL
+
+if hasattr(_kernel32, "SetProcessInformation"):
+    _kernel32.SetProcessInformation.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.wintypes.DWORD,
+    ]
+    _kernel32.SetProcessInformation.restype = ctypes.wintypes.BOOL
+
+_NtSIP = _ntdll.NtSetInformationProcess
+_NtSIP.restype = ctypes.c_long
+_NtSIP.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong]
+
+_NtQIP = _ntdll.NtQueryInformationProcess
+_NtQIP.restype = ctypes.c_long
+_NtQIP.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p]
+
+_advapi32.OpenProcessToken.argtypes = [
+    ctypes.wintypes.HANDLE,
+    ctypes.wintypes.DWORD,
+    ctypes.POINTER(ctypes.wintypes.HANDLE),
+]
+_advapi32.OpenProcessToken.restype = ctypes.wintypes.BOOL
+
+_advapi32.LookupPrivilegeValueW.argtypes = [
+    ctypes.wintypes.LPCWSTR,
+    ctypes.wintypes.LPCWSTR,
+    ctypes.c_void_p,
+]
+_advapi32.LookupPrivilegeValueW.restype = ctypes.wintypes.BOOL
+
+_advapi32.AdjustTokenPrivileges.argtypes = [
+    ctypes.wintypes.HANDLE,
+    ctypes.wintypes.BOOL,
+    ctypes.c_void_p,
+    ctypes.wintypes.DWORD,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
+_advapi32.AdjustTokenPrivileges.restype = ctypes.wintypes.BOOL
+
+if hasattr(_advapi32, "GetTokenInformation"):
+    _advapi32.GetTokenInformation.argtypes = [
+        ctypes.wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.wintypes.DWORD,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    _advapi32.GetTokenInformation.restype = ctypes.wintypes.BOOL
+
+if hasattr(_advapi32, "ConvertSidToStringSidW"):
+    _advapi32.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_wchar_p),
+    ]
+    _advapi32.ConvertSidToStringSidW.restype = ctypes.wintypes.BOOL
+
+if _psapi and hasattr(_psapi, "EmptyWorkingSet"):
+    _psapi.EmptyWorkingSet.argtypes = [ctypes.wintypes.HANDLE]
+    _psapi.EmptyWorkingSet.restype = ctypes.wintypes.BOOL
+
+if hasattr(_user32, "FindWindowW"):
+    _user32.FindWindowW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR]
+    _user32.FindWindowW.restype = ctypes.wintypes.HWND
+
+if hasattr(_user32, "ShowWindow"):
+    _user32.ShowWindow.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+    _user32.ShowWindow.restype = ctypes.wintypes.BOOL
+
+if hasattr(_user32, "SetForegroundWindow"):
+    _user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+    _user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+
+if hasattr(_user32, "ReleaseCapture"):
+    _user32.ReleaseCapture.argtypes = []
+    _user32.ReleaseCapture.restype = ctypes.wintypes.BOOL
+
+if hasattr(_user32, "SendMessageW"):
+    _user32.SendMessageW.argtypes = [
+        ctypes.wintypes.HWND,
+        ctypes.wintypes.UINT,
+        ctypes.wintypes.WPARAM,
+        ctypes.wintypes.LPARAM,
+    ]
+    _user32.SendMessageW.restype = ctypes.c_longlong
+
+if _powrprof and hasattr(_powrprof, "PowerGetActiveScheme"):
+    _powrprof.PowerGetActiveScheme.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(WIN32_GUID))]
+    _powrprof.PowerGetActiveScheme.restype = ctypes.wintypes.DWORD
+
+if _powrprof and hasattr(_powrprof, "PowerSetActiveScheme"):
+    _powrprof.PowerSetActiveScheme.argtypes = [ctypes.c_void_p, ctypes.POINTER(WIN32_GUID)]
+    _powrprof.PowerSetActiveScheme.restype = ctypes.wintypes.DWORD
+
+if _powrprof and hasattr(_powrprof, "PowerEnumerate"):
+    _powrprof.PowerEnumerate.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    _powrprof.PowerEnumerate.restype = ctypes.wintypes.DWORD
+
+if _powrprof and hasattr(_powrprof, "PowerReadFriendlyName"):
+    _powrprof.PowerReadFriendlyName.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(WIN32_GUID),
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.wintypes.DWORD),
+    ]
+    _powrprof.PowerReadFriendlyName.restype = ctypes.wintypes.DWORD
+
+if _dwmapi and hasattr(_dwmapi, "DwmSetWindowAttribute"):
+    _dwmapi.DwmSetWindowAttribute.argtypes = [
+        ctypes.wintypes.HWND,
+        ctypes.wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.wintypes.DWORD,
+    ]
+    _dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+
+if _dwmapi and hasattr(_dwmapi, "DwmExtendFrameIntoClientArea"):
+    _dwmapi.DwmExtendFrameIntoClientArea.argtypes = [
+        ctypes.wintypes.HWND,
+        ctypes.c_void_p,
+    ]
+    _dwmapi.DwmExtendFrameIntoClientArea.restype = ctypes.c_long
+
+
 # Global Static Caches
 _cache_lock = threading.Lock()
 _applied_cache: dict[tuple[int, float], dict] = {}
@@ -127,22 +313,19 @@ _last_running_pids: dict[str, int] = {}
 
 def acquire_single_instance_mutex() -> object:
     name = "Local\\ProcessX_SingleInstance_v2"
-    kernel32 = ctypes.windll.kernel32
-    handle = kernel32.CreateMutexW(None, True, name)
-    if not handle or kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        hwnd = ctypes.windll.user32.FindWindowW(None, "ProcessX v2.0")
+    handle = _kernel32.CreateMutexW(None, True, name)
+    if not handle or _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        hwnd = _user32.FindWindowW(None, "ProcessX v2.0")
         if hwnd:
-            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            ctypes.windll.user32.SetForegroundWindow(hwnd)
+            _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            _user32.SetForegroundWindow(hwnd)
         sys.exit(0)
     return handle
 
 
 def enable_token_privilege(privilege_name: str) -> bool:
+    h_token = None
     try:
-        advapi32 = ctypes.windll.advapi32
-        kernel32 = ctypes.windll.kernel32
-
         class LUID(ctypes.Structure):
             _fields_ = [("LowPart", ctypes.c_ulong), ("HighPart", ctypes.c_long)]
 
@@ -152,13 +335,14 @@ def enable_token_privilege(privilege_name: str) -> bool:
         class TOKEN_PRIVILEGES(ctypes.Structure):
             _fields_ = [("PrivilegeCount", ctypes.c_ulong), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
 
-        h_token = ctypes.c_void_p()
-        if not advapi32.OpenProcessToken(ctypes.c_void_p(-1), 0x0028, ctypes.byref(h_token)):  # TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
+        token = ctypes.wintypes.HANDLE()
+        if not _advapi32.OpenProcessToken(_kernel32.GetCurrentProcess(), 0x0028, ctypes.byref(token)):  # TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY
             return False
+        h_token = token
 
         try:
             luid = LUID()
-            if not advapi32.LookupPrivilegeValueW(None, privilege_name, ctypes.byref(luid)):
+            if not _advapi32.LookupPrivilegeValueW(None, privilege_name, ctypes.byref(luid)):
                 return False
 
             tp = TOKEN_PRIVILEGES()
@@ -166,11 +350,12 @@ def enable_token_privilege(privilege_name: str) -> bool:
             tp.Privileges[0].Luid = luid
             tp.Privileges[0].Attributes = 0x00000002  # SE_PRIVILEGE_ENABLED
 
-            advapi32.AdjustTokenPrivileges(h_token, False, ctypes.byref(tp), ctypes.sizeof(tp), None, None)
-            return kernel32.GetLastError() == 0
+            _advapi32.AdjustTokenPrivileges(h_token, False, ctypes.byref(tp), ctypes.sizeof(tp), None, None)
+            return _kernel32.GetLastError() == 0
         finally:
-            kernel32.CloseHandle(h_token)
-    except (OSError, PermissionError):
+            if h_token:
+                _kernel32.CloseHandle(h_token)
+    except (OSError, PermissionError, Exception):
         return False
 
 
@@ -261,189 +446,205 @@ CPU_COUNT = CPU_TOPOLOGY["logical_processor_count"]
 
 
 def set_cpu_sets(pid: int, cpu_indices: list | None) -> bool:
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = None
-        for access in (PROCESS_SET_LIMITED_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, PROCESS_ALL_ACCESS):
-            h_proc = kernel32.OpenProcess(access, False, pid)
+        for access in (
+            PROCESS_SET_LIMITED_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
+            PROCESS_ALL_ACCESS,
+        ):
+            h_proc = _kernel32.OpenProcess(access, False, pid)
             if h_proc:
                 break
         if not h_proc:
             return False
 
-        try:
-            if not cpu_indices:
-                return bool(kernel32.SetProcessDefaultCpuSets(h_proc, None, 0))
+        if not cpu_indices:
+            return bool(_kernel32.SetProcessDefaultCpuSets(h_proc, None, 0))
 
-            mapping = CPU_TOPOLOGY.get("global_to_cpu_set_id", {})
-            if not mapping:
-                return False
+        mapping = CPU_TOPOLOGY.get("global_to_cpu_set_id", {})
+        if not mapping:
+            return False
 
-            set_ids = [mapping[i] for i in cpu_indices if i in mapping]
-            if len(set_ids) != len(cpu_indices):
-                return False
+        set_ids = [mapping[i] for i in cpu_indices if i in mapping]
+        if len(set_ids) != len(cpu_indices):
+            return False
 
-            arr = (ctypes.c_uint32 * len(set_ids))(*set_ids)
-            return bool(kernel32.SetProcessDefaultCpuSets(h_proc, arr, len(set_ids)))
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError):
+        arr = (ctypes.c_uint32 * len(set_ids))(*set_ids)
+        return bool(_kernel32.SetProcessDefaultCpuSets(h_proc, arr, len(set_ids)))
+    except (OSError, PermissionError, Exception):
         return False
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def get_effective_cpu_sets(pid: int) -> list[int]:
     mapping = CPU_TOPOLOGY.get("cpu_set_id_to_global", {})
     if not mapping:
         return []
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if not h_proc:
             return []
-        try:
-            count = ctypes.c_ulong(0)
-            kernel32.GetProcessDefaultCpuSets(h_proc, None, 0, ctypes.byref(count))
-            if count.value == 0:
-                return []
-            arr = (ctypes.c_uint32 * count.value)()
-            kernel32.GetProcessDefaultCpuSets(h_proc, arr, count.value, ctypes.byref(count))
-            return sorted(set(mapping[s] for s in arr if s in mapping))
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError):
+        count = ctypes.wintypes.ULONG(0)
+        _kernel32.GetProcessDefaultCpuSets(h_proc, None, 0, ctypes.byref(count))
+        if count.value == 0:
+            return []
+        arr = (ctypes.c_uint32 * count.value)()
+        _kernel32.GetProcessDefaultCpuSets(h_proc, arr, count.value, ctypes.byref(count))
+        return sorted(set(mapping[s] for s in arr if s in mapping))
+    except (OSError, PermissionError, Exception):
         return []
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def get_io_priority(pid: int) -> int:
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) or kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_proc:
+            h_proc = _kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
         if not h_proc:
             return -1
-        try:
-            io_val = ctypes.c_ulong(0)
-            if _NtQIP(h_proc, ProcessIoPriority, ctypes.byref(io_val), ctypes.sizeof(io_val), None) == 0:
-                return int(io_val.value)
-            return -1
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError):
+        io_val = ctypes.c_ulong(0)
+        if _NtQIP(h_proc, ProcessIoPriority, ctypes.byref(io_val), ctypes.sizeof(io_val), None) == 0:
+            return int(io_val.value)
         return -1
+    except (OSError, PermissionError, Exception):
+        return -1
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def set_io_priority(pid: int, level: int) -> tuple[bool, str]:
     if not 0 <= level <= 3:
         return False, f"Invalid level {level}"
+    h_proc = None
     try:
         if level == 3:
             ensure_increase_base_priority()
 
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, pid) or kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, pid)
         if not h_proc:
-            return False, f"OpenProcess error {kernel32.GetLastError()}"
+            h_proc = _kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if not h_proc:
+            return False, f"OpenProcess error {_kernel32.GetLastError()}"
 
-        try:
-            io_val = ctypes.c_ulong(level)
-            status = _NtSIP(h_proc, ProcessIoPriority, ctypes.byref(io_val), ctypes.sizeof(io_val))
-            if status == 0:
-                return True, "OK"
-            if status == -1073741727:  # STATUS_PRIVILEGE_NOT_HELD
-                return False, "Requires Administrator privileges"
-            return False, f"NtStatus 0x{status & 0xFFFFFFFF:08X}"
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError) as e:
+        io_val = ctypes.c_ulong(level)
+        status = _NtSIP(h_proc, ProcessIoPriority, ctypes.byref(io_val), ctypes.sizeof(io_val))
+        if status == 0:
+            return True, "OK"
+        if status == -1073741727:  # STATUS_PRIVILEGE_NOT_HELD
+            return False, "Requires Administrator privileges"
+        return False, f"NtStatus 0x{status & 0xFFFFFFFF:08X}"
+    except (OSError, PermissionError, Exception) as e:
         return False, str(e)
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def get_memory_priority(pid: int) -> int:
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) or kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_proc:
+            h_proc = _kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
         if not h_proc:
             return -1
-        try:
-            mem = MEMORY_PRIORITY_INFORMATION()
-            if kernel32.GetProcessInformation(h_proc, ProcessMemoryPriority, ctypes.byref(mem), ctypes.sizeof(mem)):
-                return int(mem.MemoryPriority)
-            return -1
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError):
+        mem = MEMORY_PRIORITY_INFORMATION()
+        if _kernel32.GetProcessInformation(h_proc, ProcessMemoryPriority, ctypes.byref(mem), ctypes.sizeof(mem)):
+            return int(mem.MemoryPriority)
         return -1
+    except (OSError, PermissionError, Exception):
+        return -1
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def set_memory_priority(pid: int, level: int) -> tuple[bool, str]:
-    if level not in (1, 2, 3, 5):
+    if level not in (1, 2, 3, 4, 5):
         return False, f"Invalid level {level}"
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, pid) or kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, pid)
         if not h_proc:
-            return False, f"OpenProcess error {kernel32.GetLastError()}"
-        try:
-            mem = MEMORY_PRIORITY_INFORMATION(level)
-            if kernel32.SetProcessInformation(h_proc, ProcessMemoryPriority, ctypes.byref(mem), ctypes.sizeof(mem)):
-                return True, "OK"
-            return False, f"SetProcessInformation error {kernel32.GetLastError()}"
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError) as e:
+            h_proc = _kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if not h_proc:
+            return False, f"OpenProcess error {_kernel32.GetLastError()}"
+        mem = MEMORY_PRIORITY_INFORMATION(level)
+        if _kernel32.SetProcessInformation(h_proc, ProcessMemoryPriority, ctypes.byref(mem), ctypes.sizeof(mem)):
+            return True, "OK"
+        return False, f"SetProcessInformation error {_kernel32.GetLastError()}"
+    except (OSError, PermissionError, Exception) as e:
         return False, str(e)
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def get_ecoqos(pid: int) -> bool:
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid) or kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_proc:
+            h_proc = _kernel32.OpenProcess(PROCESS_QUERY_INFORMATION, False, pid)
         if not h_proc:
             return False
-        try:
-            state = PROCESS_POWER_THROTTLING_STATE(Version=PROCESS_POWER_THROTTLING_CURRENT_VERSION)
-            if kernel32.GetProcessInformation(h_proc, ProcessPowerThrottling, ctypes.byref(state), ctypes.sizeof(state)):
-                return bool(state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED)
-            return False
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError):
+        state = PROCESS_POWER_THROTTLING_STATE(Version=PROCESS_POWER_THROTTLING_CURRENT_VERSION)
+        if _kernel32.GetProcessInformation(h_proc, ProcessPowerThrottling, ctypes.byref(state), ctypes.sizeof(state)):
+            return bool(state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED)
         return False
+    except (OSError, PermissionError, Exception):
+        return False
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def set_ecoqos(pid: int, enabled: bool) -> tuple[bool, str]:
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, pid) or kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, pid)
         if not h_proc:
-            return False, f"OpenProcess error {kernel32.GetLastError()}"
-        try:
-            state = PROCESS_POWER_THROTTLING_STATE()
-            state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION
-            state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED
-            state.StateMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED if enabled else 0
-            if kernel32.SetProcessInformation(h_proc, ProcessPowerThrottling, ctypes.byref(state), ctypes.sizeof(state)):
-                return True, "OK"
-            return False, f"SetProcessInformation error {kernel32.GetLastError()}"
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError) as e:
+            h_proc = _kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+        if not h_proc:
+            return False, f"OpenProcess error {_kernel32.GetLastError()}"
+        state = PROCESS_POWER_THROTTLING_STATE()
+        state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION
+        state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+        state.StateMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED if enabled else 0
+        if _kernel32.SetProcessInformation(h_proc, ProcessPowerThrottling, ctypes.byref(state), ctypes.sizeof(state)):
+            return True, "OK"
+        return False, f"SetProcessInformation error {_kernel32.GetLastError()}"
+    except (OSError, PermissionError, Exception) as e:
         return False, str(e)
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def trim_process_memory(pid: int) -> bool:
     """Flush working set to standby list via EmptyWorkingSet."""
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        psapi = ctypes.windll.psapi
-        h_proc = kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_QUERY_INFORMATION, False, pid)
         if not h_proc:
             return False
-        try:
-            return bool(psapi.EmptyWorkingSet(h_proc))
-        finally:
-            kernel32.CloseHandle(h_proc)
-    except (OSError, PermissionError):
+        if _psapi and hasattr(_psapi, "EmptyWorkingSet"):
+            return bool(_psapi.EmptyWorkingSet(h_proc))
         return False
+    except (OSError, PermissionError, Exception):
+        return False
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def kill_process(pid: int) -> bool:
@@ -451,19 +652,19 @@ def kill_process(pid: int) -> bool:
         p = psutil.Process(pid)
         p.kill()
         return True
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
+    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
         pass
+    h_proc = None
     try:
-        kernel32 = ctypes.windll.kernel32
-        h_proc = kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+        h_proc = _kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
         if h_proc:
-            try:
-                return bool(kernel32.TerminateProcess(h_proc, 1))
-            finally:
-                kernel32.CloseHandle(h_proc)
-    except OSError:
-        pass
-    return False
+            return bool(_kernel32.TerminateProcess(h_proc, 1))
+        return False
+    except (OSError, PermissionError, Exception):
+        return False
+    finally:
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 # Power Plan Management via powrprof.dll (Zero subprocess calls)
@@ -473,13 +674,15 @@ def _guid_from_str(guid_str: str) -> WIN32_GUID:
 
 
 def get_active_power_plan_guid() -> str | None:
+    if not _powrprof:
+        return None
     try:
-        powrprof = ctypes.windll.powrprof
         p_guid = ctypes.POINTER(WIN32_GUID)()
-        if powrprof.PowerGetActiveScheme(None, ctypes.byref(p_guid)) == 0 and p_guid:
-            active_str = p_guid.contents.to_str()
-            ctypes.windll.kernel32.LocalFree(p_guid)
-            return active_str
+        if _powrprof.PowerGetActiveScheme(None, ctypes.byref(p_guid)) == 0 and p_guid:
+            try:
+                return p_guid.contents.to_str()
+            finally:
+                _kernel32.LocalFree(p_guid)
     except OSError:
         pass
     return None
@@ -488,10 +691,11 @@ def get_active_power_plan_guid() -> str | None:
 def set_active_power_plan(guid_str: str) -> tuple[bool, str]:
     if not _GUID_RE.match(guid_str.strip()):
         return False, f"Invalid GUID format: {guid_str}"
+    if not _powrprof:
+        return False, "powrprof library not available"
     try:
-        powrprof = ctypes.windll.powrprof
         g = _guid_from_str(guid_str)
-        res = powrprof.PowerSetActiveScheme(None, ctypes.byref(g))
+        res = _powrprof.PowerSetActiveScheme(None, ctypes.byref(g))
         if res == 0:
             return True, "OK"
         return False, f"PowerSetActiveScheme error {res}"
@@ -501,8 +705,9 @@ def set_active_power_plan(guid_str: str) -> tuple[bool, str]:
 
 def list_power_plans() -> list[tuple[str, str, bool]]:
     plans = []
+    if not _powrprof:
+        return plans
     try:
-        powrprof = ctypes.windll.powrprof
         active_guid = (get_active_power_plan_guid() or "").lower()
         ACCESS_SCHEME = 16
         index = 0
@@ -511,7 +716,7 @@ def list_power_plans() -> list[tuple[str, str, bool]]:
 
         while True:
             buf_size.value = 16
-            res = powrprof.PowerEnumerate(None, None, None, ACCESS_SCHEME, index, buf, ctypes.byref(buf_size))
+            res = _powrprof.PowerEnumerate(None, None, None, ACCESS_SCHEME, index, buf, ctypes.byref(buf_size))
             if res != 0:
                 break
             g = WIN32_GUID.from_buffer_copy(buf)
@@ -519,7 +724,7 @@ def list_power_plans() -> list[tuple[str, str, bool]]:
 
             name_buf_size = ctypes.wintypes.DWORD(512)
             name_buf = (ctypes.c_byte * 512)()
-            n_res = powrprof.PowerReadFriendlyName(None, ctypes.byref(g), None, None, name_buf, ctypes.byref(name_buf_size))
+            n_res = _powrprof.PowerReadFriendlyName(None, ctypes.byref(g), None, None, name_buf, ctypes.byref(name_buf_size))
             name = ctypes.wstring_at(name_buf) if n_res == 0 else g_str
 
             plans.append((name, g_str, g_str.lower() == active_guid))
@@ -606,41 +811,25 @@ def _remove_legacy_run_key() -> None:
 
 
 def _get_current_user_id() -> str:
+    token = ctypes.wintypes.HANDLE()
     try:
-        advapi32 = ctypes.windll.advapi32
-        kernel32 = ctypes.windll.kernel32
-        kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
-        advapi32.OpenProcessToken.argtypes = [
-            ctypes.wintypes.HANDLE,
-            ctypes.wintypes.DWORD,
-            ctypes.POINTER(ctypes.wintypes.HANDLE),
-        ]
-        advapi32.GetTokenInformation.argtypes = [
-            ctypes.wintypes.HANDLE,
-            ctypes.c_int,
-            ctypes.c_void_p,
-            ctypes.wintypes.DWORD,
-            ctypes.POINTER(ctypes.wintypes.DWORD),
-        ]
-        advapi32.ConvertSidToStringSidW.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_wchar_p),
-        ]
-
-        token = ctypes.wintypes.HANDLE()
-        if advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
-            size = ctypes.wintypes.DWORD(0)
-            advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
-            buf = (ctypes.c_byte * size.value)()
-            if advapi32.GetTokenInformation(token, 1, buf, size.value, ctypes.byref(size)):
-                sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p)).contents
-                pstr = ctypes.c_wchar_p()
-                if advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(pstr)):
-                    sid_str = pstr.value
-                    kernel32.LocalFree(pstr)
-                    kernel32.CloseHandle(token)
-                    return sid_str
-            kernel32.CloseHandle(token)
+        if _advapi32.OpenProcessToken(_kernel32.GetCurrentProcess(), 0x0008, ctypes.byref(token)):
+            try:
+                size = ctypes.wintypes.DWORD(0)
+                _advapi32.GetTokenInformation(token, 1, None, 0, ctypes.byref(size))
+                if size.value > 0:
+                    buf = (ctypes.c_byte * size.value)()
+                    if _advapi32.GetTokenInformation(token, 1, buf, size.value, ctypes.byref(size)):
+                        sid_ptr = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p)).contents
+                        pstr = ctypes.c_wchar_p()
+                        if _advapi32.ConvertSidToStringSidW(sid_ptr, ctypes.byref(pstr)):
+                            try:
+                                sid_str = pstr.value or ""
+                                return sid_str
+                            finally:
+                                _kernel32.LocalFree(pstr)
+            finally:
+                _kernel32.CloseHandle(token)
     except Exception:
         pass
 
@@ -761,31 +950,30 @@ def remove_from_startup() -> tuple[bool, str]:
 
 # DWM Window Blur & Styling
 def set_dwm_corner_preference(hwnd: int, rounded: bool = True) -> bool:
-    if not hwnd or sys.platform != "win32":
+    if not hwnd or sys.platform != "win32" or not _dwmapi:
         return False
     try:
         val = ctypes.c_int(DWMWCP_ROUND if rounded else DWMWCP_DONOTROUND)
-        return ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(val), ctypes.sizeof(val)) == 0
+        return _dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ctypes.byref(val), ctypes.sizeof(val)) == 0
     except OSError:
         return False
 
 
 def apply_dwm_glass(hwnd: int, backdrop_type: int = 3, dark: bool = True, rounded: bool = True) -> bool:
-    if not hwnd or sys.platform != "win32":
+    if not hwnd or sys.platform != "win32" or not _dwmapi:
         return False
     try:
-        dwmapi = ctypes.windll.dwmapi
         if dark:
             val_dark = ctypes.c_int(1)
-            dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(val_dark), ctypes.sizeof(val_dark))
+            _dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(val_dark), ctypes.sizeof(val_dark))
 
         set_dwm_corner_preference(hwnd, rounded=rounded)
 
         val_backdrop = ctypes.c_int(backdrop_type)
-        dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(val_backdrop), ctypes.sizeof(val_backdrop))
+        _dwmapi.DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, ctypes.byref(val_backdrop), ctypes.sizeof(val_backdrop))
 
         margins = DWM_MARGINS(-1, -1, -1, -1)
-        dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
+        _dwmapi.DwmExtendFrameIntoClientArea(hwnd, ctypes.byref(margins))
         return True
     except OSError:
         return False
@@ -810,10 +998,11 @@ def query_process_image_path(pid: int) -> str:
     """
     if not pid or pid <= 4:
         return ""
-    h_proc = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not h_proc:
-        return ""
+    h_proc = None
     try:
+        h_proc = _kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not h_proc:
+            return ""
         buf = ctypes.create_unicode_buffer(1024)
         size = ctypes.wintypes.DWORD(len(buf))
         # dwFlags = 0 returns standard Win32 format (e.g. C:\Windows\...)
@@ -825,7 +1014,8 @@ def query_process_image_path(pid: int) -> str:
     except Exception:
         return ""
     finally:
-        _kernel32.CloseHandle(h_proc)
+        if h_proc:
+            _kernel32.CloseHandle(h_proc)
 
 
 def resolve_exe_path_dynamically(name: str) -> str:
@@ -1280,20 +1470,29 @@ def delete_rule(rules: dict, rule_key: str):
 
 
 def get_running_pids(rules: dict) -> dict[str, int]:
+    """
+    Returns a dict mapping {rule_key: pid} for each unique rule in rules
+    that currently matches at least one active running process on the system.
+    Guarantees:
+    - Only valid rule keys from rules are present in the returned dict.
+    - Multiple running instances under the same profile only count once.
+    - len(result) <= len(rules) is always true.
+    """
     if not rules:
         return {}
     result = {}
-    for p in psutil.process_iter(["name", "pid"]):
-        try:
-            rk, r = find_rule_for_process(p, rules)
-            if rk and rk not in result:
-                pid = p.info["pid"]
-                result[rk] = pid
-                nm = (r.get("name") or os.path.basename(r.get("exe_path") or rk)).lower()
-                if nm not in result:
-                    result[nm] = pid
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
+    try:
+        for p in psutil.process_iter(["name", "pid"]):
+            try:
+                rk, _ = find_rule_for_process(p, rules)
+                if rk and rk in rules and rk not in result:
+                    result[rk] = p.info["pid"]
+                    if len(result) == len(rules):
+                        break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                pass
+    except (OSError, PermissionError, Exception):
+        pass
     return result
 
 
@@ -1428,7 +1627,7 @@ def collect_proc_snapshot(rules: dict) -> list[dict]:
             else:
                 try:
                     p_exe = p.exe()
-                except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError, PermissionError, Exception):
                     p_exe = ""
 
                 # Step 2: Fallback to Win32 QueryFullProcessImageNameW via OpenProcess(0x1000)
@@ -1450,7 +1649,7 @@ def collect_proc_snapshot(rules: dict) -> list[dict]:
                 "cpu": cpu,
                 "exe_path": p_exe,
             }
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError, PermissionError, Exception):
             pass
 
     with _cache_lock:
@@ -1646,7 +1845,7 @@ class RuleWatcher:
                             p_id = p.info.get("pid")
                             if n in want_names and not is_critical_process(n, p_id):
                                 candidate_pids.append((p_id, n))
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
                             pass
 
                 current_rule_pids = {}
@@ -1655,7 +1854,7 @@ class RuleWatcher:
                         rk, rule = find_rule_for_process(pid, rules, name=n)
                         if rk and rule:
                             current_rule_pids.setdefault(rk, set()).add(pid)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
                         pass
 
                 newly_applied = []
@@ -1672,7 +1871,7 @@ class RuleWatcher:
                             pp = rule.get("power_plan")
                             if pp:
                                 _power_plan_manager.on_process_seen(rk, pp)
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
                             pass
                     last_rule_pids[rk] = cur_pids
 
@@ -1682,11 +1881,17 @@ class RuleWatcher:
                     del last_rule_pids[rk]
 
                 if (newly_applied or exited_rules) and self.refresh_cb:
-                    self.refresh_cb()
+                    try:
+                        self.refresh_cb()
+                    except Exception:
+                        pass
 
                 if newly_applied and self.status_cb:
-                    self.status_cb(f"Auto-applied: {', '.join(sorted(set(newly_applied)))}")
-            except (OSError, PermissionError):
+                    try:
+                        self.status_cb(f"Auto-applied: {', '.join(sorted(set(newly_applied)))}")
+                    except Exception:
+                        pass
+            except (OSError, PermissionError, Exception):
                 pass
 
             if self._stop_event.wait(timeout=self._interval):

@@ -17,6 +17,7 @@ from PyQt6.QtCore import (
     QPoint,
     QPointF,
     QPropertyAnimation,
+    QRect,
     QRectF,
     QSize,
     Qt,
@@ -37,6 +38,7 @@ from PyQt6.QtGui import (
     QPaintEvent,
     QPainter,
     QPainterPath,
+    QPalette,
     QPen,
     QPixmap,
     QResizeEvent,
@@ -433,8 +435,9 @@ QPushButton#DangerBtn:hover {{
 
 /* ── Tree & Table Views ───────────────────────────────────────────────────── */
 /* ── Tree Views (Process Tree) ────────────────────────────────────────────── */
-QTreeWidget, QTreeView {{
+QTreeWidget, QTreeView, QTreeWidget::viewport, QTreeView::viewport {{
     background-color: {SURFACE_CARD};
+    background: {SURFACE_CARD};
     border: 1px solid {BORDER_SUBTLE};
     border-radius: 8px;
     background-clip: padding-box;
@@ -483,8 +486,10 @@ QTreeWidget::item:focus, QTreeView::item:focus {{
 }}
 
 /* ── Table Views (Rules & Profiles) ───────────────────────────────────────── */
-QTableWidget, QTableView {{
+QTableWidget, QTableView, QTableWidget::viewport, QTableView::viewport,
+QAbstractItemView, QAbstractItemView::viewport {{
     background-color: {SURFACE_CARD};
+    background: {SURFACE_CARD};
     border: 1px solid {BORDER_SUBTLE};
     border-radius: 8px;
     background-clip: padding-box;
@@ -886,31 +891,42 @@ def resolve_process_icon(name: str, exe_path: str = None, size: int = 16) -> QIc
     2. Fallback to Windows OS native generic executable icon (dummy.exe) for pseudo-processes
        without real files (System Idle Process, System, Registry, Memory Compression, Secure System, etc.)
        or inaccessible processes.
+    Aggressively caches by path and name fallback to prevent GDI/handle leaks and disk churn.
     Never falls back to Meyaki.ico.
     """
+    key = ""
     if exe_path:
-        norm_path = os.path.normcase(os.path.abspath(exe_path)) if os.path.isabs(exe_path) else os.path.normcase(exe_path)
+        key = os.path.normcase(os.path.abspath(exe_path)) if os.path.isabs(exe_path) else os.path.normcase(exe_path)
+    elif name:
+        key = f"proc_name:{name.lower()}"
+
+    if key:
         with _icon_lock:
-            if norm_path in _exe_icon_cache:
-                cached = _exe_icon_cache[norm_path]
+            if key in _exe_icon_cache:
+                cached = _exe_icon_cache[key]
                 if not cached.isNull():
                     return cached
-                _exe_icon_cache.pop(norm_path, None)
+                _exe_icon_cache.pop(key, None)
 
-        if os.path.isfile(norm_path):
-            try:
-                provider = _get_icon_provider()
-                ico = provider.icon(QFileInfo(norm_path))
-                if ico and not ico.isNull():
-                    with _icon_lock:
-                        _exe_icon_cache[norm_path] = ico
-                        if len(_exe_icon_cache) > 2048:
-                            _exe_icon_cache.pop(next(iter(_exe_icon_cache)))
-                    return ico
-            except Exception:
-                pass
+    if exe_path and os.path.isfile(key):
+        try:
+            provider = _get_icon_provider()
+            ico = provider.icon(QFileInfo(key))
+            if ico and not ico.isNull():
+                with _icon_lock:
+                    _exe_icon_cache[key] = ico
+                    if len(_exe_icon_cache) > 2048:
+                        _exe_icon_cache.pop(next(iter(_exe_icon_cache)))
+                return ico
+        except Exception:
+            pass
 
-    return get_generic_exe_icon(size=size)
+    # Fallback to generic exe icon and cache it so we do not hit disk/provider repeatedly
+    gen_ico = get_generic_exe_icon(size=size)
+    if key and gen_ico and not gen_ico.isNull():
+        with _icon_lock:
+            _exe_icon_cache[key] = gen_ico
+    return gen_ico
 
 
 
@@ -1883,11 +1899,11 @@ class ActionToolbar(QFrame):
         self.retranslate_ui()
 
     def update_metrics(self, active_rules: int, total_rules: int, proc_groups: int):
-        self._active_rules = active_rules
-        self._total_rules = total_rules
-        self._proc_groups = proc_groups
-        self.metric_rules.setText(f"{tr('metric_profiles')} <b style='color: {ACCENT_BLUE};'>{active_rules}</b> / {total_rules}")
-        self.metric_procs.setText(f"{tr('metric_procs')} <b style='color: {TEXT_PRIMARY};'>{proc_groups}</b>")
+        self._total_rules = max(0, total_rules)
+        self._active_rules = min(max(0, active_rules), self._total_rules)
+        self._proc_groups = max(0, proc_groups)
+        self.metric_rules.setText(f"{tr('metric_profiles')} <b style='color: {ACCENT_BLUE};'>{self._active_rules}</b> / {self._total_rules}")
+        self.metric_procs.setText(f"{tr('metric_procs')} <b style='color: {TEXT_PRIMARY};'>{self._proc_groups}</b>")
 
     def set_watcher_status(self, is_active: bool, text: str = None):
         self._is_watcher_active = is_active
@@ -2061,6 +2077,13 @@ class ProcessTreeWidget(QTreeWidget):
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
         self.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.viewport().setStyleSheet(f"background-color: {SURFACE_CARD}; background: {SURFACE_CARD};")
+        pal = self.palette()
+        pal.setColor(QPalette.ColorRole.Base, QColor(SURFACE_CARD))
+        pal.setColor(QPalette.ColorRole.Window, QColor(SURFACE_CARD))
+        self.setPalette(pal)
+        self.viewport().setPalette(pal)
+        self.viewport().setAutoFillBackground(True)
 
         self.hovered_item: QTreeWidgetItem | None = None
         self._last_wheel_time: float = 0.0
@@ -2090,10 +2113,10 @@ class ProcessTreeWidget(QTreeWidget):
         self.setColumnWidth(1, 75)   # PID
         self.setColumnWidth(2, 80)   # CPU
         self.setColumnWidth(3, 95)   # RAM
-        self.setColumnWidth(4, 115)  # CPU Priority
-        self.setColumnWidth(5, 105)  # I/O Priority
-        self.setColumnWidth(6, 130)  # CPU Sets
-        self.setColumnWidth(7, 95)   # Profile Status
+        self.setColumnWidth(4, 140)  # CPU Priority (sufficient width for Vietnamese text)
+        self.setColumnWidth(5, 115)  # I/O Priority (sufficient width for Vietnamese text)
+        self.setColumnWidth(6, 125)  # CPU Sets
+        self.setColumnWidth(7, 100)  # Profile Status
 
         self._icon_cache: OrderedDict[str, QIcon] = OrderedDict()
         self._items_by_pid: dict[int, QTreeWidgetItem] = {}
@@ -2123,6 +2146,13 @@ class ProcessTreeWidget(QTreeWidget):
         self._update_header_labels()
         self.refresh_requested.emit()
         self.viewport().update()
+
+    def paintEvent(self, event: QPaintEvent):
+        """Paint solid dark background across entire viewport so empty rows are never light gray."""
+        painter = QPainter(self.viewport())
+        painter.fillRect(event.rect(), QColor(SURFACE_CARD))
+        painter.end()
+        super().paintEvent(event)
 
     def updateGeometries(self):
         super().updateGeometries()
@@ -2587,6 +2617,7 @@ MEM_CONFIG = [
     (1, "mem_very_low"),
     (2, "mem_low"),
     (3, "mem_medium"),
+    (4, "mem_below_normal"),
     (5, "mem_normal"),
 ]
 
@@ -2922,6 +2953,12 @@ class ProfilesManagerDialog(FramelessDialog):
         # ── Profiles Table
         self.table = QTableWidget(self)
         self.table.viewport().setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, False)
+        self.table.viewport().setStyleSheet(f"background-color: {SURFACE_CARD}; background: {SURFACE_CARD};")
+        t_pal = self.table.palette()
+        t_pal.setColor(QPalette.ColorRole.Base, QColor(SURFACE_CARD))
+        t_pal.setColor(QPalette.ColorRole.Window, QColor(SURFACE_CARD))
+        self.table.setPalette(t_pal)
+        self.table.viewport().setPalette(t_pal)
         self.table.setColumnCount(6)
         self._update_table_headers()
         self.table.setIconSize(QSize(16, 16))
@@ -3035,7 +3072,7 @@ class ProfilesManagerDialog(FramelessDialog):
 
             pp_guid = rule.get("power_plan")
             pp_name = plan_name_by_guid.get(pp_guid.lower(), pp_guid) if pp_guid else tr("val_none")
-            is_running = (rk in running or exe_name.lower() in running)
+            is_running = (rk in running)
             status = tr("pm_status_running") if is_running else tr("pm_status_stopped")
 
             rows.append((rk, exe_name, disp_label, pri_name, io_name, aff_str, pp_name, status, is_running))
@@ -3112,6 +3149,7 @@ class ProfilesManagerDialog(FramelessDialog):
     _on_double_click = _on_item_double_clicked
 
     def _on_rule_updated(self):
+        self.rules = load_rules()
         self.populate_table()
         self.rules_modified.emit()
 
@@ -3143,6 +3181,7 @@ class ProfilesManagerDialog(FramelessDialog):
         )
         if ret == QMessageBox.StandardButton.Yes:
             delete_rule(self.rules, rk)
+            self.rules = load_rules()
             self.populate_table()
             self.rules_modified.emit()
 
@@ -3241,9 +3280,19 @@ class RuleEditorDialog(FramelessDialog):
                 if not self.path_hint:
                     self.path_hint = self.existing.get("exe_path")
 
-        # Responsive geometry: minimum 800x680, default 820x700
-        self.setMinimumSize(800, 680)
-        self.resize(820, 700)
+        # Responsive geometry: dynamically adapts to screen resolution and DPI scale
+        screen = QApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+        target_w = min(940, max(840, int(avail.width() * 0.70)))
+        target_h = min(860, max(720, int(avail.height() * 0.88)))
+        min_w = min(800, avail.width() - 40)
+        min_h = min(640, avail.height() - 60)
+        self.setMinimumSize(min_w, min_h)
+        self.resize(target_w, target_h)
+        # Center on screen
+        cx = avail.x() + (avail.width() - target_w) // 2
+        cy = avail.y() + (avail.height() - target_h) // 2
+        self.move(max(avail.x(), cx), max(avail.y(), cy))
 
         self._build_ui()
         I18N.language_changed.connect(self.retranslate_ui)
@@ -3305,6 +3354,7 @@ class RuleEditorDialog(FramelessDialog):
 
         # ── Scroll Area for Configuration Sections ───────────────────────────
         scroll = QScrollArea(self)
+        self.scroll = scroll
         scroll.setObjectName("EditorScrollArea")
         scroll.viewport().setObjectName("EditorScrollViewport")
         scroll.setWidgetResizable(True)
@@ -3315,7 +3365,7 @@ class RuleEditorDialog(FramelessDialog):
         container = QWidget()
         container.setObjectName("EditorScrollContainer")
         c_layout = QVBoxLayout(container)
-        c_layout.setContentsMargins(0, 0, 6, 0)
+        c_layout.setContentsMargins(0, 4, 6, 8)
         c_layout.setSpacing(10)
 
         # ── 1. CPU Priority Card (Segmented Control) ─────────────────────────
@@ -3542,6 +3592,15 @@ class RuleEditorDialog(FramelessDialog):
         scaled_pix.setDevicePixelRatio(dpr)
         self.icon_lbl.setPixmap(scaled_pix)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Ensure scroll area starts flush at the top so Section 1 header is clearly visible
+        if hasattr(self, "scroll") and self.scroll:
+            self.scroll.verticalScrollBar().setValue(0)
+            QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(0) if hasattr(self, "scroll") and self.scroll else None)
+        if hasattr(self, "btn_save") and self.btn_save:
+            self.btn_save.setFocus()
+
     def retranslate_ui(self, lang: str):
         """Reactive live translation update across all cards, segments, and buttons."""
         self.setWindowTitle(tr("ed_title", name=self.proc_name))
@@ -3659,15 +3718,8 @@ class RuleEditorDialog(FramelessDialog):
             pid=self.pid, path_hint=self.path_hint, auto_apply=True
         )
 
-        if instance_ct > 0:
-            summary = tr("ed_status_saved_and_applied", count=instance_ct)
-            if any_failed:
-                summary += " (some instances may require Administrator)"
-            self.result_lbl.setText(summary)
-        else:
-            self.result_lbl.setText(tr("ed_status_saved_rule"))
-
         self.rule_saved.emit()
+        self.accept()
 
     _save_profile = _save_and_apply
 
@@ -3702,8 +3754,14 @@ class ProcessSnapshotWorker(QThread):
         try:
             snapshot = collect_proc_snapshot(self.rules_supplier())
             self.snapshot_ready.emit(snapshot)
-        except (OSError, PermissionError):
-            pass
+        except Exception:
+            self.snapshot_ready.emit([])
+
+
+class _WatcherBridge(QObject):
+    """Thread-safe signal dispatcher from background RuleWatcher thread to Qt Main UI thread."""
+    status_changed = pyqtSignal(str)
+    refresh_requested = pyqtSignal()
 
 
 # Main Window
@@ -3771,11 +3829,16 @@ class ProcessX(QMainWindow):
         self.worker = ProcessSnapshotWorker(lambda: self.rules, self)
         self.worker.snapshot_ready.connect(self._on_snapshot_ready)
 
+        # Thread-safe Watcher Bridge
+        self._watcher_bridge = _WatcherBridge(self)
+        self._watcher_bridge.status_changed.connect(self._on_watcher_status)
+        self._watcher_bridge.refresh_requested.connect(self.trigger_refresh)
+
         # Watcher
         self.watcher = RuleWatcher(
             lambda: self.rules,
-            status_cb=self._on_watcher_status,
-            refresh_cb=self.trigger_refresh,
+            status_cb=self._watcher_bridge.status_changed.emit,
+            refresh_cb=self._watcher_bridge.refresh_requested.emit,
         )
         self.watcher.start()
 
@@ -4003,8 +4066,14 @@ class ProcessX(QMainWindow):
         if self._quitting:
             return
         self.tree.update_snapshot(snapshot)
+        self.rules = load_rules()
         running = get_running_pids(self.rules)
-        self.toolbar.update_metrics(len(running), len(self.rules), len(snapshot))
+        active_cnt = min(len(running), len(self.rules))
+        self.toolbar.update_metrics(active_cnt, len(self.rules), len(snapshot))
+
+    def _on_rules_changed(self):
+        self.rules = load_rules()
+        self.trigger_refresh()
 
     def _on_search(self, text: str):
         self.tree.set_filter(text)
@@ -4012,20 +4081,20 @@ class ProcessX(QMainWindow):
 
     def _open_profiles(self):
         dlg = ProfilesManagerDialog(self, self.rules)
-        dlg.rules_modified.connect(self.trigger_refresh)
+        dlg.rules_modified.connect(self._on_rules_changed)
         dlg.exec()
 
     def _open_add_rule(self):
         dlg = AddRuleDialog(self)
         if dlg.exec() and dlg.result_exe:
             ed = RuleEditorDialog(self, proc_name=dlg.result_exe, rules=self.rules, path_hint=dlg.result_path)
-            ed.rule_saved.connect(self.trigger_refresh)
+            ed.rule_saved.connect(self._on_rules_changed)
             ed.exec()
 
     def _open_editor(self, name: str, pid: int = 0, path: str = ""):
         ed = RuleEditorDialog(self, proc_name=name, rules=self.rules, pid=pid or None, path_hint=path or None)
-        ed.rule_saved.connect(self.trigger_refresh)
-        ed.rule_deleted.connect(self.trigger_refresh)
+        ed.rule_saved.connect(self._on_rules_changed)
+        ed.rule_deleted.connect(self._on_rules_changed)
         ed.exec()
 
     def _open_settings(self):
