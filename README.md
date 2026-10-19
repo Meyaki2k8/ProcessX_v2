@@ -41,7 +41,7 @@ While inspired by the initial concepts of [ProcessX](https://github.com/jadenpee
 3. **Multi-level Priority & Resource Control:**
    - Windows CPU Scheduling Priority (Idle, Below Normal, Normal, Above Normal, High, Realtime)
    - I/O Priority tuning (Very Low, Low, Normal, High) via undocumented NT kernel APIs
-   - Memory Priority 
+   - Memory Priority (Very Low, Low, Medium, Below Normal, Normal)
 
 4. **Dynamic Power Plan Switching:**
    - Automatically switches Windows Power Schemes when target games or high-load processes launch, and restores the previous power plan when they exit
@@ -170,7 +170,7 @@ Dự án kế thừa ý tưởng quản lý tiến trình của [ProcessX](https
 3. **Điều khiển ưu tiên tài nguyên đa tầng:**
    - Độ ưu tiên CPU (Nghỉ, Dưới Bình Thường, Bình Thường, Trên Bình Thường, Cao, Thời Gian Thực)
    - Độ ưu tiên I/O đọc ghi đĩa (Rất thấp, Thấp, Bình Thường, Cao) qua các API NT kernel
-   - Độ ưu tiên bộ nhớ 
+   - Độ ưu tiên bộ nhớ (Rất thấp, Thấp, Trung Bình, Dưới Bình Thường, Bình Thường)
 
 4. **Tự động chuyển đổi gói điện năng (Power Plan):**
    - Tự động kích hoạt gói hiệu năng cao khi mở game hoặc ứng dụng nặng, và tự động khôi phục lại gói nguồn ban đầu khi ứng dụng đóng
