@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 import sys
-import threading
+import threading    
 import time
 import traceback
 from collections import OrderedDict
@@ -1717,7 +1717,7 @@ class LanguageToggle(QFrame):
 class CustomTitleBar(QWidget):
     search_changed = pyqtSignal(str)
 
-    def __init__(self, parent_window, title: str = "ProcessX", version: str = "v2.0"):
+    def __init__(self, parent_window, title: str = "ProcessX", version: str = "v2.0.2.1"):
         super().__init__(parent_window)
         self.parent_window = parent_window
         self.setObjectName("TitleBar")
@@ -3828,7 +3828,7 @@ class ProcessX(QMainWindow):
         self.root_layout.setContentsMargins(0, 0, 0, 0)
         self.root_layout.setSpacing(0)
 
-        self.title_bar = CustomTitleBar(self, title="ProcessX", version="v2.0")
+        self.title_bar = CustomTitleBar(self, title="ProcessX", version="v2.0.2.1")
         self.title_bar.search_changed.connect(self._on_search)
         self.root_layout.addWidget(self.title_bar)
 
@@ -3920,21 +3920,35 @@ class ProcessX(QMainWindow):
         self.tray.show()
 
     def _on_tray_activated(self, reason):
-        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.show_and_activate()
 
     def show_and_activate(self):
         now = time.monotonic()
-        if now - getattr(self, "_last_show_activate_time", 0.0) < 0.2:
+        if now - getattr(self, "_last_show_activate_time", 0.0) < 0.3:
             return
         self._last_show_activate_time = now
 
-        hwnd = int(self.winId()) if hasattr(self, "winId") else 0
-        if hwnd:
-            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        self.show()
+        if self.isMinimized():
+            if self.windowState() & Qt.WindowState.WindowMaximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        else:
+            self.show()
+
         self.activateWindow()
         self.raise_()
+        if sys.platform == "win32":
+            hwnd = int(self.winId()) if hasattr(self, "winId") and self.isVisible() else 0
+            if hwnd:
+                try:
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                except Exception:
+                    pass
+
+        self._normalize_window_geometry()
+
         self.watcher.set_active_mode(True)
         if not self.refresh_timer.isActive():
             self.refresh_timer.start()
@@ -3964,11 +3978,65 @@ class ProcessX(QMainWindow):
         self.trigger_refresh()
 
     def _ensure_maximized_geometry(self):
+        if getattr(self, "_in_ensure_max_geo", False):
+            return
+        if not self.isMaximized():
+            return
+        if sys.platform == "win32":
+            hwnd = int(self.winId()) if hasattr(self, "winId") and self.isVisible() else 0
+            if hwnd and not ctypes.windll.user32.IsZoomed(hwnd):
+                return
+        self._in_ensure_max_geo = True
+        try:
+            screen = self.screen()
+            if screen:
+                avail_geo = screen.availableGeometry()
+                if self.geometry() != avail_geo:
+                    self.setGeometry(avail_geo)
+        finally:
+            self._in_ensure_max_geo = False
+
+    def _normalize_window_geometry(self):
         screen = self.screen()
-        if screen:
-            avail_geo = screen.availableGeometry()
-            if self.geometry() != avail_geo:
-                self.setGeometry(avail_geo)
+        if not screen:
+            return
+        avail = screen.availableGeometry()
+        hwnd = int(self.winId()) if hasattr(self, "winId") and self.isVisible() else 0
+
+        if hwnd and sys.platform == "win32":
+            is_qt_max = self.isMaximized()
+            is_native_max = bool(ctypes.windll.user32.IsZoomed(hwnd))
+            if is_qt_max != is_native_max:
+                if is_qt_max:
+                    self.showMaximized()
+                else:
+                    self.showNormal()
+                return
+
+        if not self.isMaximized():
+            geo = self.geometry()
+            w, h = geo.width(), geo.height()
+            needs_reset = False
+            if w >= avail.width() and h >= avail.height():
+                w, h = 980, 600
+                needs_reset = True
+
+            x, y = geo.x(), geo.y()
+            if x + w > avail.right():
+                x = max(avail.left(), avail.right() - w)
+                needs_reset = True
+            if y + h > avail.bottom():
+                y = max(avail.top(), avail.bottom() - h)
+                needs_reset = True
+            if x < avail.left():
+                x = avail.left()
+                needs_reset = True
+            if y < avail.top():
+                y = avail.top()
+                needs_reset = True
+
+            if needs_reset:
+                self.setGeometry(x, y, w, h)
 
     def _apply_state_styling(self, is_max: bool):
         self.root_frame.is_maximized = is_max

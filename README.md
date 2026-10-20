@@ -2,7 +2,7 @@
   <img src="assets/Meyaki.ico" alt="ProcessX Logo" width="80" height="80">
 </p>
 
-<h1 align="center">ProcessX v2.0</h1>
+<h1 align="center">ProcessX v2.0.2.1</h1>
 
 <p align="center">
   <b>Advanced Windows Process & CPU Optimization Utility</b><br>

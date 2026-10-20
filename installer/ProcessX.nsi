@@ -10,7 +10,7 @@ SetCompressor /SOLID lzma
 
 !define APP_NAME   "ProcessX v2.0"
 !define APP_EXE    "ProcessX v2.0.exe"
-!define APP_VER    "2.0.0.0"
+!define APP_VER    "2.0.2.1"
 !define PUBLISHER  "ProcessX"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 !define MUTEX_NAME "Local\ProcessX_SingleInstance_v2"
