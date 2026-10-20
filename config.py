@@ -3,6 +3,10 @@ import os
 import threading
 from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
+try:
+    import winreg
+except ImportError:
+    winreg = None
 
 APP_DIR = Path(os.environ.get("APPDATA", ".")) / "ProcessX"
 APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -516,11 +520,42 @@ def is_critical_process(name: str = "", pid: int = None, exe_path: str = "") -> 
     return False
 
 
+def _consume_pending_language() -> str | None:
+    if winreg is None:
+        return None
+    reg_path = r"Software\ProcessX v2.0"
+    val_name = "LanguagePending"
+    lang = None
+    try:
+        flags = winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, flags) as key:
+            val, vtype = winreg.QueryValueEx(key, val_name)
+            if vtype == winreg.REG_SZ and isinstance(val, str):
+                cleaned = val.strip().lower()
+                if cleaned in ("vi", "en"):
+                    lang = cleaned
+    except OSError:
+        return None
+
+    if lang is not None:
+        try:
+            write_flags = winreg.KEY_SET_VALUE | winreg.KEY_WOW64_64KEY
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path, 0, write_flags) as key:
+                winreg.DeleteValue(key, val_name)
+        except OSError:
+            pass
+
+    return lang
+
+
 class _I18n(QObject):
     language_changed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
+        pending = _consume_pending_language()
+        if pending:
+            set_setting("language", pending)
         self._lang = str(get_setting("language", "vi")).lower()
         if self._lang not in TRANSLATIONS:
             self._lang = "vi"

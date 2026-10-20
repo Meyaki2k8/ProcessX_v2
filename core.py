@@ -108,6 +108,10 @@ _kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
 _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
 _kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
 
+_kernel32_err = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32_err.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.wintypes.BOOL, ctypes.wintypes.LPCWSTR]
+_kernel32_err.CreateMutexW.restype = ctypes.wintypes.HANDLE
+
 _kernel32.GetCurrentProcess.argtypes = []
 _kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
 
@@ -248,6 +252,21 @@ if hasattr(_user32, "SendMessageW"):
     ]
     _user32.SendMessageW.restype = ctypes.c_longlong
 
+if hasattr(_user32, "RegisterWindowMessageW"):
+    _user32.RegisterWindowMessageW.argtypes = [ctypes.wintypes.LPCWSTR]
+    _user32.RegisterWindowMessageW.restype = ctypes.wintypes.UINT
+
+if hasattr(_user32, "PostMessageW"):
+    _user32.PostMessageW.argtypes = [
+        ctypes.wintypes.HWND,
+        ctypes.wintypes.UINT,
+        ctypes.wintypes.WPARAM,
+        ctypes.wintypes.LPARAM,
+    ]
+    _user32.PostMessageW.restype = ctypes.wintypes.BOOL
+
+WM_PROCESSX_SHOW_NAME = "ProcessX_ShowAndActivate_v2"
+
 if _powrprof and hasattr(_powrprof, "PowerGetActiveScheme"):
     _powrprof.PowerGetActiveScheme.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.POINTER(WIN32_GUID))]
     _powrprof.PowerGetActiveScheme.restype = ctypes.wintypes.DWORD
@@ -313,11 +332,14 @@ _last_running_pids: dict[str, int] = {}
 
 def acquire_single_instance_mutex() -> object:
     name = "Local\\ProcessX_SingleInstance_v2"
-    handle = _kernel32.CreateMutexW(None, True, name)
-    if not handle or _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+    handle = _kernel32_err.CreateMutexW(None, True, name)
+    last_error = ctypes.get_last_error()
+    if not handle or last_error == 183:  # ERROR_ALREADY_EXISTS
         hwnd = _user32.FindWindowW(None, "ProcessX v2.0")
         if hwnd:
-            _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            msg_id = _user32.RegisterWindowMessageW(WM_PROCESSX_SHOW_NAME)
+            if msg_id:
+                _user32.PostMessageW(hwnd, msg_id, 0, 0)
             _user32.SetForegroundWindow(hwnd)
         sys.exit(0)
     return handle

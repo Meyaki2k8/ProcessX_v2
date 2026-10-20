@@ -1,4 +1,4 @@
-﻿; ProcessX v2.0 installer (NSIS 3.x, Unicode)
+; ProcessX v2.0 installer (NSIS 3.x, Unicode)
 Unicode true
 SetCompressor /SOLID lzma
 
@@ -112,6 +112,11 @@ Section "${APP_NAME}" SecMain
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
   WriteRegStr HKLM "Software\${APP_NAME}" "InstallDir" "$INSTDIR"
+  ${If} $LANGUAGE == ${LANG_VIETNAMESE}
+    WriteRegStr HKLM "Software\${APP_NAME}" "LanguagePending" "vi"
+  ${Else}
+    WriteRegStr HKLM "Software\${APP_NAME}" "LanguagePending" "en"
+  ${EndIf}
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKLM "${UNINST_KEY}" "DisplayVersion" "${APP_VER}"
   WriteRegStr HKLM "${UNINST_KEY}" "Publisher" "${PUBLISHER}"

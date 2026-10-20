@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from collections import OrderedDict
 from pathlib import Path
 
@@ -78,6 +79,7 @@ from PyQt6.QtWidgets import (
 )
 
 from config import (
+    APP_DIR,
     IO_PRIORITY_NAMES,
     PRIORITY_MAP,
     I18N,
@@ -115,7 +117,25 @@ from core import (
     save_and_apply_rule,
     set_dwm_corner_preference,
     trim_process_memory,
+    WM_PROCESSX_SHOW_NAME,
 )
+
+WM_PROCESSX_SHOW = ctypes.windll.user32.RegisterWindowMessageW(WM_PROCESSX_SHOW_NAME)
+
+
+def _log_error(context: str, exc: Exception | None = None):
+    try:
+        log_path = APP_DIR / "processx.log"
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[{now}] [ERROR in {context}]\n")
+            if exc is not None:
+                traceback.print_exception(type(exc), exc, exc.__traceback__, file=f)
+            else:
+                f.write(f"{context}\n")
+    except Exception:
+        pass
+
 
 # ── Color Palette (Modern Deep Obsidian & Electric Blue) ─────────────────────
 # Primary Background: Deep Obsidian Black
@@ -2241,199 +2261,211 @@ class ProcessTreeWidget(QTreeWidget):
         return get_generic_exe_icon(16)
 
     def update_snapshot(self, snapshot: list[dict]):
-        vbar = self.verticalScrollBar()
-        top_item = None
-        top_offset = 0
-        scroll_val = vbar.value()
-        user_scrolled_recently = (time.monotonic() - getattr(self, "_last_wheel_time", 0.0) < 0.3)
-        if scroll_val > 0 and not user_scrolled_recently:
-            top_item = self.itemAt(0, 0)
-            if top_item:
-                top_offset = self.visualItemRect(top_item).top()
+        try:
+            vbar = self.verticalScrollBar()
+            top_item = None
+            top_offset = 0
+            scroll_val = vbar.value()
+            user_scrolled_recently = (time.monotonic() - getattr(self, "_last_wheel_time", 0.0) < 0.3)
+            if scroll_val > 0 and not user_scrolled_recently:
+                top_item = self.itemAt(0, 0)
+                if top_item:
+                    top_offset = self.visualItemRect(top_item).top()
 
-        incoming_pids = set()
-        node_map = {}
+            incoming_pids = set()
+            node_map = {}
 
-        def register_nodes(nodes):
-            for n in nodes:
-                p_id = n["pid"]
-                incoming_pids.add(p_id)
-                node_map[p_id] = n
-                children = n.get("children", [])
-                if children:
-                    register_nodes(children)
+            def register_nodes(nodes):
+                for n in nodes:
+                    p_id = n["pid"]
+                    incoming_pids.add(p_id)
+                    node_map[p_id] = n
+                    children = n.get("children", [])
+                    if children:
+                        register_nodes(children)
 
-        register_nodes(snapshot)
+            register_nodes(snapshot)
 
-        existing_pids = set(self._items_by_pid.keys())
-        dead_pids = existing_pids - incoming_pids
-        for d_pid in dead_pids:
-            dead_item = self._items_by_pid.pop(d_pid, None)
-            if dead_item:
-                if self.hovered_item == dead_item:
-                    self.hovered_item = None
-                p = dead_item.parent()
-                if p:
-                    p.removeChild(dead_item)
-                else:
-                    idx = self.indexOfTopLevelItem(dead_item)
-                    if idx >= 0:
-                        self.takeTopLevelItem(idx)
-
-        filter_q = self._filter_text.strip().lower()
-        blue_color = QColor(ACCENT_BLUE)
-        secondary_color = QColor(TEXT_SECONDARY)
-        muted_color = QColor(TEXT_MUTED)
-        primary_color = QColor(TEXT_PRIMARY)
-
-        def matches_filter(node: dict) -> bool:
-            if not filter_q:
-                return True
-            if filter_q in node.get("name", "").lower():
-                return True
-            if filter_q in str(node.get("pid", "")):
-                return True
-            if filter_q in (node.get("exe_path") or "").lower():
-                return True
-            for svc in node.get("services", []):
-                if filter_q in svc.lower():
-                    return True
-            for child in node.get("children", []):
-                if matches_filter(child):
-                    return True
-            return False
-
-        def sync_node(node: dict, parent_item: QTreeWidgetItem | None, index_in_parent: int):
-            pid = node["pid"]
-            name = node["name"]
-            exe_path = node.get("exe_path") or ""
-            has_rule = node.get("has_rule", False)
-            children = node.get("children", [])
-            child_count = len(children)
-            services = node.get("services", [])
-            is_sys = node.get("is_system", False)
-
-            display_name = name
-            if services:
-                if len(services) == 1:
-                    display_name = f"{name}  [{services[0]}]"
-                elif len(services) <= 2:
-                    display_name = f"{name}  [{', '.join(services)}]"
-                else:
-                    display_name = f"{name}  [{services[0]} +{len(services)-1} svcs]"
-
-            if child_count > 0:
-                display_name += f" ({child_count})"
-
-            rule_badge = tr("rule_active") if has_rule else tr("rule_none")
-
-            item = self._items_by_pid.get(pid)
-            is_new = (item is None)
-
-            if is_new:
-                item = QTreeWidgetItem()
-                self._items_by_pid[pid] = item
-                item.setData(0, Qt.ItemDataRole.UserRole, name)
-                item.setData(1, Qt.ItemDataRole.UserRole, pid)
-                item.setData(2, Qt.ItemDataRole.UserRole, exe_path)
-                item.setData(3, Qt.ItemDataRole.UserRole, is_sys)
-                item.setIcon(0, self.get_process_icon(name, exe_path))
-
-                for c_idx in (1, 2, 3):
-                    item.setFont(c_idx, self.mono_font)
-                    item.setTextAlignment(c_idx, Qt.AlignmentFlag.AlignCenter)
-                for c_idx in (4, 5, 6, 7):
-                    item.setTextAlignment(c_idx, Qt.AlignmentFlag.AlignCenter)
-
-                if parent_item:
-                    parent_item.insertChild(index_in_parent, item)
-                else:
-                    self.insertTopLevelItem(index_in_parent, item)
-            else:
-                curr_parent = item.parent()
-                if curr_parent != parent_item:
-                    if curr_parent:
-                        curr_parent.removeChild(item)
+            existing_pids = set(self._items_by_pid.keys())
+            dead_pids = existing_pids - incoming_pids
+            for d_pid in dead_pids:
+                dead_item = self._items_by_pid.pop(d_pid, None)
+                if dead_item:
+                    if self.hovered_item == dead_item:
+                        self.hovered_item = None
+                    dead_item.takeChildren()
+                    p = dead_item.parent()
+                    if p:
+                        p.removeChild(dead_item)
                     else:
-                        old_idx = self.indexOfTopLevelItem(item)
-                        if old_idx >= 0:
-                            self.takeTopLevelItem(old_idx)
+                        idx = self.indexOfTopLevelItem(dead_item)
+                        if idx >= 0:
+                            self.takeTopLevelItem(idx)
+
+            filter_q = self._filter_text.strip().lower()
+            blue_color = QColor(ACCENT_BLUE)
+            secondary_color = QColor(TEXT_SECONDARY)
+            muted_color = QColor(TEXT_MUTED)
+            primary_color = QColor(TEXT_PRIMARY)
+
+            def matches_filter(node: dict) -> bool:
+                if not filter_q:
+                    return True
+                if filter_q in node.get("name", "").lower():
+                    return True
+                if filter_q in str(node.get("pid", "")):
+                    return True
+                if filter_q in (node.get("exe_path") or "").lower():
+                    return True
+                for svc in node.get("services", []):
+                    if filter_q in svc.lower():
+                        return True
+                for child in node.get("children", []):
+                    if matches_filter(child):
+                        return True
+                return False
+
+            def sync_node(node: dict, parent_item: QTreeWidgetItem | None, index_in_parent: int):
+                pid = node["pid"]
+                name = node["name"]
+                exe_path = node.get("exe_path") or ""
+                has_rule = node.get("has_rule", False)
+                children = node.get("children", [])
+                child_count = len(children)
+                services = node.get("services", [])
+                is_sys = node.get("is_system", False)
+
+                display_name = name
+                if services:
+                    if len(services) == 1:
+                        display_name = f"{name}  [{services[0]}]"
+                    elif len(services) <= 2:
+                        display_name = f"{name}  [{', '.join(services)}]"
+                    else:
+                        display_name = f"{name}  [{services[0]} +{len(services)-1} svcs]"
+
+                if child_count > 0:
+                    display_name += f" ({child_count})"
+
+                rule_badge = tr("rule_active") if has_rule else tr("rule_none")
+
+                item = self._items_by_pid.get(pid)
+                if item is not None:
+                    try:
+                        _ = item.parent()
+                    except RuntimeError:
+                        item = None
+                        self._items_by_pid.pop(pid, None)
+
+                is_new = (item is None)
+
+                if is_new:
+                    item = QTreeWidgetItem()
+                    self._items_by_pid[pid] = item
+                    item.setData(0, Qt.ItemDataRole.UserRole, name)
+                    item.setData(1, Qt.ItemDataRole.UserRole, pid)
+                    item.setData(2, Qt.ItemDataRole.UserRole, exe_path)
+                    item.setData(3, Qt.ItemDataRole.UserRole, is_sys)
+                    item.setIcon(0, self.get_process_icon(name, exe_path))
+
+                    for c_idx in (1, 2, 3):
+                        item.setFont(c_idx, self.mono_font)
+                        item.setTextAlignment(c_idx, Qt.AlignmentFlag.AlignCenter)
+                    for c_idx in (4, 5, 6, 7):
+                        item.setTextAlignment(c_idx, Qt.AlignmentFlag.AlignCenter)
+
                     if parent_item:
                         parent_item.insertChild(index_in_parent, item)
                     else:
                         self.insertTopLevelItem(index_in_parent, item)
-
-                old_path = item.data(2, Qt.ItemDataRole.UserRole)
-                if old_path != exe_path or item.icon(0).isNull():
-                    item.setData(2, Qt.ItemDataRole.UserRole, exe_path)
-                    item.setIcon(0, self.get_process_icon(name, exe_path))
-
-            if item.text(0) != display_name:
-                item.setText(0, display_name)
-            if item.text(1) != str(pid):
-                item.setText(1, str(pid))
-            if item.text(2) != node["cpu_str"]:
-                item.setText(2, node["cpu_str"])
-            if item.text(3) != node["ram_str"]:
-                item.setText(3, node["ram_str"])
-            pri_disp = tr("val_none") if node["pri_str"] in ("None", "Not Specified") else translate_val(node["pri_str"], "cpu")
-            io_disp = tr("val_none") if node["io_str"] in ("None", "Not Specified") else translate_val(node["io_str"], "io")
-            aff_disp = tr("val_none") if node["aff_str"] in ("None", "Not Specified") else translate_val(node["aff_str"])
-            if item.text(4) != pri_disp:
-                item.setText(4, pri_disp)
-            if item.text(5) != io_disp:
-                item.setText(5, io_disp)
-            if item.text(6) != aff_disp:
-                item.setText(6, aff_disp)
-            if item.text(7) != rule_badge:
-                item.setText(7, rule_badge)
-
-            if has_rule:
-                if item.foreground(0).color() != blue_color:
-                    item.setForeground(0, blue_color)
-                if item.foreground(7).color() != blue_color:
-                    item.setForeground(7, blue_color)
-                if item.font(7) != self.bold_ui_font:
-                    item.setFont(7, self.bold_ui_font)
-            else:
-                if item.foreground(7).color() != muted_color:
-                    item.setForeground(7, muted_color)
-                if is_sys:
-                    if item.foreground(0).color() != secondary_color:
-                        item.setForeground(0, secondary_color)
-                    if item.font(0) != self.ui_font:
-                        item.setFont(0, self.ui_font)
                 else:
-                    if item.foreground(0).color() != primary_color:
-                        item.setForeground(0, primary_color)
-                    if item.font(0) != self.bold_ui_font:
-                        item.setFont(0, self.bold_ui_font)
+                    curr_parent = item.parent()
+                    curr_tree = item.treeWidget()
+                    if curr_parent != parent_item or (parent_item is None and curr_tree != self):
+                        if curr_parent:
+                            curr_parent.removeChild(item)
+                        elif curr_tree == self:
+                            old_idx = self.indexOfTopLevelItem(item)
+                            if old_idx >= 0:
+                                self.takeTopLevelItem(old_idx)
+                        if parent_item:
+                            parent_item.insertChild(index_in_parent, item)
+                        else:
+                            self.insertTopLevelItem(index_in_parent, item)
 
-            if child_count > 0:
-                should_expand = pid not in self._explicitly_collapsed_pids
-                if item.isExpanded() != should_expand:
-                    item.setExpanded(should_expand)
+                    old_path = item.data(2, Qt.ItemDataRole.UserRole)
+                    if old_path != exe_path or item.icon(0).isNull():
+                        item.setData(2, Qt.ItemDataRole.UserRole, exe_path)
+                        item.setIcon(0, self.get_process_icon(name, exe_path))
 
-            if filter_q:
-                should_hide = not matches_filter(node)
-                if item.isHidden() != should_hide:
-                    item.setHidden(should_hide)
-            elif item.isHidden():
-                item.setHidden(False)
+                if item.text(0) != display_name:
+                    item.setText(0, display_name)
+                if item.text(1) != str(pid):
+                    item.setText(1, str(pid))
+                if item.text(2) != node["cpu_str"]:
+                    item.setText(2, node["cpu_str"])
+                if item.text(3) != node["ram_str"]:
+                    item.setText(3, node["ram_str"])
+                pri_disp = tr("val_none") if node["pri_str"] in ("None", "Not Specified") else translate_val(node["pri_str"], "cpu")
+                io_disp = tr("val_none") if node["io_str"] in ("None", "Not Specified") else translate_val(node["io_str"], "io")
+                aff_disp = tr("val_none") if node["aff_str"] in ("None", "Not Specified") else translate_val(node["aff_str"])
+                if item.text(4) != pri_disp:
+                    item.setText(4, pri_disp)
+                if item.text(5) != io_disp:
+                    item.setText(5, io_disp)
+                if item.text(6) != aff_disp:
+                    item.setText(6, aff_disp)
+                if item.text(7) != rule_badge:
+                    item.setText(7, rule_badge)
 
-            for c_idx, child_node in enumerate(children):
-                sync_node(child_node, item, c_idx)
+                if has_rule:
+                    if item.foreground(0).color() != blue_color:
+                        item.setForeground(0, blue_color)
+                    if item.foreground(7).color() != blue_color:
+                        item.setForeground(7, blue_color)
+                    if item.font(7) != self.bold_ui_font:
+                        item.setFont(7, self.bold_ui_font)
+                else:
+                    if item.foreground(7).color() != muted_color:
+                        item.setForeground(7, muted_color)
+                    if is_sys:
+                        if item.foreground(0).color() != secondary_color:
+                            item.setForeground(0, secondary_color)
+                        if item.font(0) != self.ui_font:
+                            item.setFont(0, self.ui_font)
+                    else:
+                        if item.foreground(0).color() != primary_color:
+                            item.setForeground(0, primary_color)
+                        if item.font(0) != self.bold_ui_font:
+                            item.setFont(0, self.bold_ui_font)
 
-        for r_idx, root_node in enumerate(snapshot):
-            sync_node(root_node, None, r_idx)
+                if child_count > 0:
+                    should_expand = pid not in self._explicitly_collapsed_pids
+                    if item.isExpanded() != should_expand:
+                        item.setExpanded(should_expand)
 
-        if top_item and top_item.treeWidget() == self:
-            new_top = self.visualItemRect(top_item).top()
-            diff = new_top - top_offset
-            if diff != 0:
-                vbar.setValue(vbar.value() + diff)
+                if filter_q:
+                    should_hide = not matches_filter(node)
+                    if item.isHidden() != should_hide:
+                        item.setHidden(should_hide)
+                elif item.isHidden():
+                    item.setHidden(False)
 
-        self._update_hover_from_cursor()
+                for c_idx, child_node in enumerate(children):
+                    sync_node(child_node, item, c_idx)
+
+            for r_idx, root_node in enumerate(snapshot):
+                sync_node(root_node, None, r_idx)
+
+            if top_item and top_item.treeWidget() == self:
+                new_top = self.visualItemRect(top_item).top()
+                diff = new_top - top_offset
+                if diff != 0:
+                    vbar.setValue(vbar.value() + diff)
+
+            self._update_hover_from_cursor()
+        except Exception as e:
+            _log_error("ProcessTreeWidget.update_snapshot", e)
 
     def set_filter(self, query: str):
         self._filter_text = query
@@ -3754,8 +3786,8 @@ class ProcessSnapshotWorker(QThread):
         try:
             snapshot = collect_proc_snapshot(self.rules_supplier())
             self.snapshot_ready.emit(snapshot)
-        except Exception:
-            self.snapshot_ready.emit([])
+        except Exception as e:
+            _log_error("ProcessSnapshotWorker.run", e)
 
 
 class _WatcherBridge(QObject):
@@ -3828,6 +3860,7 @@ class ProcessX(QMainWindow):
         # Snapshot Worker
         self.worker = ProcessSnapshotWorker(lambda: self.rules, self)
         self.worker.snapshot_ready.connect(self._on_snapshot_ready)
+        self.worker.finished.connect(self._on_worker_finished)
 
         # Thread-safe Watcher Bridge
         self._watcher_bridge = _WatcherBridge(self)
@@ -3883,17 +3916,40 @@ class ProcessX(QMainWindow):
         self.tray_menu.addSeparator()
         self.tray_act_quit = self.tray_menu.addAction(tr("tray_quit"), self.quit_app)
         self.tray.setContextMenu(self.tray_menu)
-        self.tray.activated.connect(lambda reason: self.show_and_activate() if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick) else None)
+        self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
 
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_and_activate()
+
     def show_and_activate(self):
-        self.showNormal()
+        now = time.monotonic()
+        if now - getattr(self, "_last_show_activate_time", 0.0) < 0.2:
+            return
+        self._last_show_activate_time = now
+
+        hwnd = int(self.winId()) if hasattr(self, "winId") else 0
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+        self.show()
         self.activateWindow()
         self.raise_()
         self.watcher.set_active_mode(True)
         if not self.refresh_timer.isActive():
             self.refresh_timer.start()
         self.trigger_refresh()
+
+    def nativeEvent(self, event_type, message):
+        try:
+            if event_type == b"windows_generic_MSG":
+                msg = ctypes.wintypes.MSG.from_address(int(message))
+                if msg.message == WM_PROCESSX_SHOW:
+                    self.show_and_activate()
+                    return True, 0
+        except Exception as e:
+            _log_error("ProcessX.nativeEvent", e)
+        return False, 0
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -4061,15 +4117,20 @@ class ProcessX(QMainWindow):
         self._refreshing = True
         self.worker.start()
 
-    def _on_snapshot_ready(self, snapshot: list):
+    def _on_worker_finished(self):
         self._refreshing = False
-        if self._quitting:
-            return
-        self.tree.update_snapshot(snapshot)
-        self.rules = load_rules()
-        running = get_running_pids(self.rules)
-        active_cnt = min(len(running), len(self.rules))
-        self.toolbar.update_metrics(active_cnt, len(self.rules), len(snapshot))
+
+    def _on_snapshot_ready(self, snapshot: list):
+        try:
+            if self._quitting:
+                return
+            self.tree.update_snapshot(snapshot)
+            self.rules = load_rules()
+            running = get_running_pids(self.rules)
+            active_cnt = min(len(running), len(self.rules))
+            self.toolbar.update_metrics(active_cnt, len(self.rules), len(snapshot))
+        except Exception as e:
+            _log_error("ProcessX._on_snapshot_ready", e)
 
     def _on_rules_changed(self):
         self.rules = load_rules()

@@ -14,11 +14,11 @@ VSVersionInfo(
       StringTable('040904B0', [
         StringStruct('CompanyName', 'ProcessX'),
         StringStruct('FileDescription', 'ProcessX v2.0'),
-        StringStruct('FileVersion', '2.0.1'),
+        StringStruct('FileVersion', '2.0.2'),
         StringStruct('InternalName', 'ProcessX v2.0'),
         StringStruct('OriginalFilename', 'ProcessX v2.0.exe'),
         StringStruct('ProductName', 'ProcessX v2.0'),
-        StringStruct('ProductVersion', '2.0.1')
+        StringStruct('ProductVersion', '2.0.2')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
