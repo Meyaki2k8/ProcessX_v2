@@ -5,7 +5,7 @@ import threading
 import traceback
 from PyQt6.QtCore import QtMsgType, qInstallMessageHandler
 from config import APP_DIR, load_rules
-from core import acquire_single_instance_mutex, apply_all_rules
+from core import acquire_single_instance_mutex, apply_all_rules, recover_power_plan_on_startup
 from ui import run_app
 
 _LOG_FILE = None
@@ -89,6 +89,7 @@ def main():
         sys.exit(0)
 
     _mutex = acquire_single_instance_mutex()
+    recover_power_plan_on_startup()
     sys.exit(run_app())
 
 

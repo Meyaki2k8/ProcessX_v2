@@ -17,13 +17,16 @@ from pathlib import Path
 import psutil
 
 from config import (
+    APP_DIR,
     CRITICAL_SYSTEM_PROCESSES,
     IO_PRIORITY_MAP,
     PRIORITY_MAP,
     PRIORITY_REVERSE,
+    get_setting,
     is_critical_process,
     load_rules,
     save_rules,
+    set_setting,
     tr,
 )
 
@@ -755,6 +758,15 @@ def list_power_plans() -> list[tuple[str, str, bool]]:
         pass
     return plans
 
+def _log_power_plan_error(message: str):
+    try:
+        log_path = APP_DIR / "processx.log"
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{now}] [POWER PLAN ERROR] {message}\n")
+    except Exception:
+        pass
+
 
 class PowerPlanManager:
     def __init__(self):
@@ -763,11 +775,15 @@ class PowerPlanManager:
         self._controllers = []
 
     def on_process_seen(self, exe: str, guid: str):
-        if not _GUID_RE.match(guid.strip()):
+        guid = guid.strip()
+        if not _GUID_RE.match(guid):
             return
         with self._lock:
             if self._original_guid is None:
-                self._original_guid = get_active_power_plan_guid()
+                active = get_active_power_plan_guid()
+                if active:
+                    self._original_guid = active
+                    set_setting("power_plan_original_guid", active)
             self._controllers = [c for c in self._controllers if c[0] != exe]
             self._controllers.append((exe, guid))
             self._activate(guid)
@@ -793,19 +809,56 @@ class PowerPlanManager:
         current = get_active_power_plan_guid()
         if current and current.lower() == guid.lower():
             return
-        set_active_power_plan(guid)
+        ok, msg = set_active_power_plan(guid)
+        if not ok:
+            _log_power_plan_error(f"Failed to activate power plan {guid}: {msg}")
 
     def _restore(self):
         if not self._original_guid:
             return
         current = get_active_power_plan_guid()
         if current and current.lower() == self._original_guid.lower():
+            self._original_guid = None
+            set_setting("power_plan_original_guid", None)
             return
-        set_active_power_plan(self._original_guid)
+        ok, msg = set_active_power_plan(self._original_guid)
+        if ok:
+            self._original_guid = None
+            set_setting("power_plan_original_guid", None)
+        else:
+            _log_power_plan_error(f"Failed to restore power plan {self._original_guid}: {msg}")
+
+    def recover_on_startup(self):
+        with self._lock:
+            if self._controllers:
+                return
+            saved = get_setting("power_plan_original_guid")
+            if not saved or not isinstance(saved, str):
+                return
+            saved = saved.strip()
+            if not _GUID_RE.match(saved):
+                set_setting("power_plan_original_guid", None)
+                return
+            existing_guids = {p[1].lower() for p in list_power_plans()}
+            if saved.lower() not in existing_guids:
+                set_setting("power_plan_original_guid", None)
+                return
+            current = get_active_power_plan_guid()
+            if current and current.lower() == saved.lower():
+                set_setting("power_plan_original_guid", None)
+                return
+            ok, msg = set_active_power_plan(saved)
+            if not ok:
+                _log_power_plan_error(f"Failed to restore power plan on startup ({saved}): {msg}")
+            set_setting("power_plan_original_guid", None)
 
 
 _power_plan_manager = PowerPlanManager()
 atexit.register(_power_plan_manager.shutdown_restore)
+
+
+def recover_power_plan_on_startup():
+    _power_plan_manager.recover_on_startup()
 
 
 # Windows Startup Registration (Task Scheduler)
@@ -1002,15 +1055,6 @@ def apply_dwm_glass(hwnd: int, backdrop_type: int = 3, dark: bool = True, rounde
 
 
 # Process Cache & Dynamic Path Resolution
-def normalize_exe_path(p: str) -> str:
-    if not p:
-        return ""
-    try:
-        return os.path.normcase(os.path.abspath(p))
-    except (ValueError, OSError):
-        return os.path.normcase(str(p).strip())
-
-
 def query_process_image_path(pid: int) -> str:
     """
     Retrieves the full native executable path using Win32 API directly:
@@ -1186,13 +1230,12 @@ def find_rule_for_process(proc_or_pid, rules: dict, name: str = None, exe_path: 
         return None, None
 
     raw_path = exe_path or get_proc_exe(proc_or_pid)
-    norm_path = normalize_exe_path(raw_path) if raw_path else ""
     pid = proc_or_pid if isinstance(proc_or_pid, int) else getattr(proc_or_pid, "pid", None)
 
     if name:
         proc_name = name.lower().strip()
-    elif norm_path:
-        proc_name = os.path.basename(norm_path).lower().strip()
+    elif raw_path:
+        proc_name = os.path.basename(raw_path).lower().strip()
     elif hasattr(proc_or_pid, "name"):
         try:
             proc_name = (proc_or_pid.name() or "").lower().strip()
@@ -1201,24 +1244,16 @@ def find_rule_for_process(proc_or_pid, rules: dict, name: str = None, exe_path: 
     else:
         proc_name = ""
 
-    if is_critical_process(proc_name, pid, norm_path):
+    if is_critical_process(proc_name, pid, raw_path):
         return None, None
 
-    # Exact path match
-    if norm_path:
-        for k, r in rules.items():
-            r_path = normalize_exe_path(r.get("exe_path") or (k if os.sep in k or "/" in k else ""))
-            if r_path and r_path == norm_path:
-                return k, r
-
-    # Name-only match
     if proc_name:
+        if proc_name in rules:
+            return proc_name, rules[proc_name]
         for k, r in rules.items():
-            r_path = r.get("exe_path") or (k if os.sep in k or "/" in k else "")
-            if r_path:
-                continue
-            r_name = (r.get("name") or os.path.basename(k)).lower().strip()
-            if r_name == proc_name or k.lower().strip() == proc_name:
+            k_lower = k.lower().strip()
+            r_name = (r.get("name") or k).lower().strip()
+            if k_lower == proc_name or r_name == proc_name:
                 return k, r
 
     return None, None
@@ -1369,10 +1404,10 @@ def revert_running_instances(target_key: str, rule_hint: dict = None, all_rules:
         "memory_priority": 5,
         "ecoqos": False,
     }
-    target_path = normalize_exe_path(rule_hint.get("exe_path")) if rule_hint else ""
-    target_name = (rule_hint.get("name") or os.path.basename(target_path or target_key)).lower().strip()
+    target_name = (rule_hint.get("name") if rule_hint else "") or os.path.basename(target_key)
+    target_name = target_name.lower().strip()
 
-    if is_critical_process(target_name, exe_path=target_path):
+    if is_critical_process(target_name):
         return
 
     for p in psutil.process_iter(["name", "pid"]):
@@ -1381,32 +1416,16 @@ def revert_running_instances(target_key: str, rule_hint: dict = None, all_rules:
             p_pid = p.info.get("pid")
             if is_critical_process(p_name, p_pid) or p_name != target_name:
                 continue
-            if target_path:
-                p_path = normalize_exe_path(get_proc_exe(p))
-                if p_path and p_path != target_path:
-                    continue
             apply_rule(p, default_rule, force=True)
         except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError, OSError):
             pass
 
 
 def save_and_apply_rule(rules: dict, target_key: str, rule: dict, pid: int = None, path_hint: str = None, auto_apply: bool = True) -> tuple:
-    exe_path = rule.get("exe_path") or path_hint
-    if not exe_path and pid:
-        exe_path = get_proc_exe(pid, name=target_key)
-    if not exe_path:
-        exe_path = find_exe_path(target_key, pid=pid, path_hint=path_hint)
-
-    norm_path = normalize_exe_path(exe_path) if exe_path else ""
-    if norm_path:
-        rule["exe_path"] = exe_path
-        rule_key = norm_path
-        rule["name"] = rule.get("name") or os.path.basename(exe_path) or target_key.lower()
-        if auto_apply and target_key.lower() in rules and target_key.lower() != rule_key:
-            del rules[target_key.lower()]
-    else:
-        rule_key = target_key.lower().strip()
-        rule["name"] = rule.get("name") or target_key
+    target_name = os.path.basename(rule.get("name") or target_key).lower().strip()
+    rule_key = target_name
+    rule["name"] = rule.get("name") or target_name
+    rule.pop("exe_path", None)
 
     if auto_apply:
         rules[rule_key] = rule
@@ -1416,9 +1435,9 @@ def save_and_apply_rule(rules: dict, target_key: str, rule: dict, pid: int = Non
     all_msgs = []
     any_failed = False
     pp_guid = rule.get("power_plan")
-    target_name = (rule.get("name") or os.path.basename(rule_key)).lower().strip()
 
-    if is_critical_process(target_name, pid, exe_path):
+    runtime_exe = path_hint or (get_proc_exe(pid, name=target_name) if pid else None) or find_exe_path(target_name, pid=pid)
+    if is_critical_process(target_name, pid, runtime_exe):
         return 0, False, ["Protected: Critical system process skipped"]
 
     applied_pids = set()
@@ -1431,13 +1450,10 @@ def save_and_apply_rule(rules: dict, target_key: str, rule: dict, pid: int = Non
 
             matched = False
             if auto_apply:
-                matched_key, _ = find_rule_for_process(p, rules)
+                matched_key, _ = find_rule_for_process(p, rules, name=p_name)
                 matched = (matched_key == rule_key)
             else:
-                if norm_path:
-                    matched = (normalize_exe_path(get_proc_exe(p)) == norm_path)
-                elif p_name == target_name or p_pid == pid:
-                    matched = True
+                matched = (p_name == target_name or p_pid == pid)
 
             if matched:
                 instance_ct += 1
@@ -1473,13 +1489,16 @@ def save_and_apply_rule(rules: dict, target_key: str, rule: dict, pid: int = Non
 def delete_rule(rules: dict, rule_key: str):
     actual_key = None
     target_rule = None
-    if rule_key in rules:
+    rule_key_lower = os.path.basename(rule_key).lower().strip()
+    if rule_key_lower in rules:
+        actual_key = rule_key_lower
+        target_rule = rules[rule_key_lower]
+    elif rule_key in rules:
         actual_key = rule_key
         target_rule = rules[rule_key]
     else:
-        norm_k = normalize_exe_path(rule_key)
         for k, r in list(rules.items()):
-            if k == norm_k or normalize_exe_path(r.get("exe_path")) == norm_k or k.lower() == rule_key.lower():
+            if k.lower().strip() == rule_key_lower or (r.get("name") and r["name"].lower().strip() == rule_key_lower):
                 actual_key = k
                 target_rule = r
                 break
@@ -1506,15 +1525,46 @@ def get_running_pids(rules: dict) -> dict[str, int]:
     try:
         for p in psutil.process_iter(["name", "pid"]):
             try:
-                rk, _ = find_rule_for_process(p, rules)
+                p_name = p.info.get("name")
+                p_id = p.info.get("pid")
+                if not p_id or not psutil.pid_exists(p_id):
+                    continue
+                rk, _ = find_rule_for_process(p, rules, name=p_name)
                 if rk and rk in rules and rk not in result:
-                    result[rk] = p.info["pid"]
+                    result[rk] = p_id
                     if len(result) == len(rules):
                         break
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
                 pass
     except (OSError, PermissionError, Exception):
         pass
+    return result
+
+
+def get_live_active_profile_pids(rules: dict, watcher=None) -> dict[str, int]:
+    """
+    Returns a validated mapping {rule_key: pid} for currently active profiles,
+    consulting RuleWatcher's tracked PIDs and cross-checking process existence.
+    Falls back to get_running_pids(rules).
+    """
+    result = {}
+    if watcher:
+        try:
+            active_map = watcher.get_active_rule_pids()
+            for rk, pids in active_map.items():
+                for pid in pids:
+                    if psutil.pid_exists(pid):
+                        try:
+                            p = psutil.Process(pid)
+                            if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                                result[rk] = pid
+                                break
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                            pass
+        except Exception:
+            pass
+    if not result and rules:
+        result = get_running_pids(rules)
     return result
 
 
@@ -1808,13 +1858,16 @@ def collect_proc_snapshot(rules: dict) -> list[dict]:
 
 # Background Watcher
 class RuleWatcher:
-    def __init__(self, rules_supplier, status_cb=None, refresh_cb=None):
+    def __init__(self, rules_supplier, status_cb=None, refresh_cb=None, profile_status_cb=None):
         self.rules_supplier = rules_supplier
         self.status_cb = status_cb
         self.refresh_cb = refresh_cb
+        self.profile_status_cb = profile_status_cb
         self._stop_event = threading.Event()
         self._interval = 2.5
         self._thread = None
+        self._lock = threading.Lock()
+        self._active_rule_pids = {}
 
     def start(self):
         self._stop_event.clear()
@@ -1825,10 +1878,16 @@ class RuleWatcher:
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        with self._lock:
+            self._active_rule_pids.clear()
 
     def set_active_mode(self, active: bool):
         # 2.5s when UI is visible, 5.0s+ when minimized to tray
         self._interval = 2.5 if active else 5.5
+
+    def get_active_rule_pids(self) -> dict[str, set[int]]:
+        with self._lock:
+            return {k: set(v) for k, v in self._active_rule_pids.items()}
 
     def _run(self):
         last_rule_pids = {}
@@ -1839,14 +1898,26 @@ class RuleWatcher:
                     if last_rule_pids:
                         for rk in list(last_rule_pids):
                             _power_plan_manager.on_process_gone(rk)
+                            if self.profile_status_cb:
+                                try:
+                                    self.profile_status_cb(rk, False)
+                                except Exception:
+                                    pass
                         last_rule_pids.clear()
+                    with self._lock:
+                        self._active_rule_pids.clear()
+                    if self.status_cb:
+                        try:
+                            self.status_cb("")
+                        except Exception:
+                            pass
                     if self._stop_event.wait(timeout=self._interval):
                         break
                     continue
 
                 want_names = set()
                 for rk, r in rules.items():
-                    nm = (r.get("name") or os.path.basename(r.get("exe_path") or rk)).lower().strip()
+                    nm = (r.get("name") or os.path.basename(rk)).lower().strip()
                     if nm and not is_critical_process(nm):
                         want_names.add(nm)
 
@@ -1873,18 +1944,51 @@ class RuleWatcher:
                 current_rule_pids = {}
                 for pid, n in candidate_pids:
                     try:
+                        if not psutil.pid_exists(pid):
+                            with _cache_lock:
+                                if n in _shared_proc_map and pid in _shared_proc_map[n]:
+                                    _shared_proc_map[n].discard(pid)
+                            continue
+                        proc = psutil.Process(pid)
+                        if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                            with _cache_lock:
+                                if n in _shared_proc_map and pid in _shared_proc_map[n]:
+                                    _shared_proc_map[n].discard(pid)
+                            continue
+
                         rk, rule = find_rule_for_process(pid, rules, name=n)
                         if rk and rule:
                             current_rule_pids.setdefault(rk, set()).add(pid)
                     except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
-                        pass
+                        with _cache_lock:
+                            if n in _shared_proc_map and pid in _shared_proc_map[n]:
+                                _shared_proc_map[n].discard(pid)
+
+                # Cross-check existing tracked rules for any processes that exited
+                for rk, pids in list(last_rule_pids.items()):
+                    if rk not in current_rule_pids:
+                        continue
+                    live_pids = set()
+                    for pid in current_rule_pids[rk]:
+                        if psutil.pid_exists(pid):
+                            try:
+                                p = psutil.Process(pid)
+                                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                                    live_pids.add(pid)
+                            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+                                pass
+                    if live_pids:
+                        current_rule_pids[rk] = live_pids
+                    else:
+                        del current_rule_pids[rk]
 
                 newly_applied = []
+                newly_started_rules = []
                 for rk, cur_pids in current_rule_pids.items():
                     rule = rules[rk]
                     seen_pids = last_rule_pids.get(rk, set())
                     new_pids = cur_pids - seen_pids
-                    disp_name = rule.get("name") or os.path.basename(rule.get("exe_path") or rk)
+                    disp_name = rule.get("name") or os.path.basename(rk)
                     for pid in new_pids:
                         try:
                             proc = psutil.Process(pid)
@@ -1895,6 +1999,8 @@ class RuleWatcher:
                                 _power_plan_manager.on_process_seen(rk, pp)
                         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
                             pass
+                    if not seen_pids and cur_pids:
+                        newly_started_rules.append(rk)
                     last_rule_pids[rk] = cur_pids
 
                 exited_rules = [rk for rk in list(last_rule_pids) if rk not in current_rule_pids]
@@ -1902,15 +2008,37 @@ class RuleWatcher:
                     _power_plan_manager.on_process_gone(rk)
                     del last_rule_pids[rk]
 
+                with self._lock:
+                    self._active_rule_pids = {k: set(v) for k, v in current_rule_pids.items()}
+
+                if self.profile_status_cb:
+                    for rk in newly_started_rules:
+                        try:
+                            self.profile_status_cb(rk, True)
+                        except Exception:
+                            pass
+                    for rk in exited_rules:
+                        try:
+                            self.profile_status_cb(rk, False)
+                        except Exception:
+                            pass
+
                 if (newly_applied or exited_rules) and self.refresh_cb:
                     try:
                         self.refresh_cb()
                     except Exception:
                         pass
 
-                if newly_applied and self.status_cb:
+                if (newly_applied or exited_rules) and self.status_cb:
                     try:
-                        self.status_cb(f"Auto-applied: {', '.join(sorted(set(newly_applied)))}")
+                        if current_rule_pids:
+                            active_names = [rules[rk].get("name") or os.path.basename(rk) for rk in current_rule_pids if rk in rules]
+                            if active_names:
+                                self.status_cb(f"Auto-applied: {', '.join(sorted(set(active_names)))}")
+                            else:
+                                self.status_cb("")
+                        else:
+                            self.status_cb("")
                     except Exception:
                         pass
             except (OSError, PermissionError, Exception):

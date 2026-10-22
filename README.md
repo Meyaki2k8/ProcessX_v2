@@ -2,7 +2,7 @@
   <img src="assets/Meyaki.ico" alt="ProcessX Logo" width="80" height="80">
 </p>
 
-<h1 align="center">ProcessX v2.0.2.1</h1>
+<h1 align="center">ProcessX v2.0.2.2</h1>
 
 <p align="center">
   <b>Advanced Windows Process & CPU Optimization Utility</b><br>
@@ -54,6 +54,78 @@ While inspired by the initial concepts of [ProcessX](https://github.com/jadenpee
    - Native Windows Task Scheduler integration for elevated startup without UAC prompts
    - Minimize-to-tray background daemon watcher with adaptive polling intervals
    - Rules configuration export and import via clean JSON profiles
+
+---
+
+### 📂 Project Structure
+
+```text
+ProcessX_v2/
+├── assets/
+│   └── Meyaki.ico              # Application branding icon
+├── installer/
+│   ├── build.bat               # Automated PyInstaller & NSIS build script
+│   ├── ProcessX.nsi            # NSIS installer packaging script
+│   └── version_info.txt        # Windows PE executable version metadata
+├── .gitignore                  # Git ignore definitions
+├── config.py                   # Settings, localization dictionaries (VI/EN), and rule schemas
+├── core.py                     # Native Win32 / NT APIs, CPU Sets topology, and watcher thread
+├── main.py                     # Application entry point with single-instance mutex
+├── ui.py                       # Modern PyQt6 frameless obsidian interface
+├── LICENSE                     # MIT License (EN & VN)
+└── README.md                   # Project documentation
+```
+
+---
+
+### 🛠️ System Requirements & Setup
+
+#### Requirements:
+
+- **Operating System:** Windows 10 / Windows 11 (64-bit)
+- **Python:** 3.10+ (if running from source)
+- **Permissions:** Administrator privileges (required to adjust priority and CPU sets for protected processes)
+
+#### Development Environment:
+
+1. Clone the repository:
+
+   ```bash
+   git clone [https://github.com/](https://github.com/)[your-username]/ProcessX_v2.git
+   cd ProcessX_v2
+   ```
+
+2. Create and activate a virtual environment:
+
+   ```bash
+   python -m venv venv
+   venv\Scripts\activate
+   ```
+
+3. Install required dependencies:
+
+   ```bash
+   pip install psutil PyQt6 pyinstaller
+   ```
+
+4. Launch the application:
+   ```bash
+   python main.py
+   ```
+
+---
+
+### 📦 Building the Installer
+
+The project includes an automated script that compiles the Python source using PyInstaller and packages it with NSIS:
+
+1. Install [NSIS (Nullsoft Scriptable Install System)](https://nsis.sourceforge.io/) and ensure `makensis.exe` is added to your system `PATH`
+2. Navigate to the `installer` directory and execute:
+   ```cmd
+   cd installer
+   build.bat
+   ```
+3. The standalone installer executable will be generated inside the `dist` folder
 
 ---
 
@@ -111,6 +183,78 @@ Dự án kế thừa ý tưởng quản lý tiến trình của [ProcessX](https
    - Đăng ký khởi động cùng Windows qua Task Scheduler, tự động cấp quyền Admin mà không bị thông báo UAC làm phiền
    - Chạy ẩn dưới khay hệ thống (System Tray) với cơ chế nền tự động phát hiện ứng dụng mới mở
    - Hỗ trợ xuất và nhập danh sách cấu hình rules thông qua file JSON
+
+---
+
+### 📂 Cấu trúc thư mục
+
+```text
+ProcessX_v2/
+├── assets/
+│   └── Meyaki.ico              # Icon ứng dụng
+├── installer/
+│   ├── build.bat               # Script tự động build file thực thi và bộ cài đặt
+│   ├── ProcessX.nsi            # Script cấu hình NSIS installer
+│   └── version_info.txt        # Thông tin phiên bản file PE (.exe)
+├── .gitignore                  # Cấu hình bỏ qua tệp rác khi dùng Git
+├── config.py                   # Lưu trữ cấu hình, bộ từ khóa song ngữ VI/EN, định dạng rules
+├── core.py                     # API Win32 / NT, topo CPU Sets, quản lý nguồn và luồng nền
+├── main.py                     # Entry point khởi động ứng dụng với Single Instance Mutex
+├── ui.py                       # Giao diện PyQt6 frameless obsidian hiện đại
+├── LICENSE                     # Giấy phép MIT (Bản tiếng Anh & Bản dịch tiếng Việt)
+└── README.md                   # Tài liệu hướng dẫn dự án
+```
+
+---
+
+### 🛠️ Yêu cầu hệ thống & Hướng dẫn cài đặt
+
+#### Yêu cầu:
+
+- **Hệ điều hành:** Windows 10 / Windows 11 (64-bit)
+- **Python:** 3.10 trở lên (nếu chạy từ mã nguồn)
+- **Quyền hạn:** Chạy dưới quyền Administrator để có thể can thiệp độ ưu tiên và CPU Sets của các tiến trình hệ thống
+
+#### Chạy từ mã nguồn:
+
+1. Tải mã nguồn về máy:
+
+   ```bash
+   git clone [https://github.com/](https://github.com/)[your-username]/ProcessX_v2.git
+   cd ProcessX_v2
+   ```
+
+2. Tạo và kích hoạt môi trường ảo:
+
+   ```bash
+   python -m venv venv
+   venv\Scripts\activate
+   ```
+
+3. Cài đặt các thư viện phụ thuộc:
+
+   ```bash
+   pip install psutil PyQt6 pyinstaller
+   ```
+
+4. Khởi chạy ứng dụng:
+   ```bash
+   python main.py
+   ```
+
+---
+
+### 📦 Đóng gói ứng dụng thành Installer
+
+Dự án đã chuẩn bị sẵn kịch bản biên dịch thành file `.exe` bằng PyInstaller và đóng gói file cài đặt NSIS:
+
+1. Cài đặt [NSIS](https://nsis.sourceforge.io/) và kiểm tra biến môi trường `PATH` đã nhận lệnh `makensis.exe`
+2. Mở cửa sổ dòng lệnh tại thư mục `installer` và chạy:
+   ```cmd
+   cd installer
+   build.bat
+   ```
+3. File cài đặt hoàn chỉnh sẽ nằm trong thư mục `dist`
 
 ---
 

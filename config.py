@@ -1,12 +1,15 @@
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from PyQt6.QtCore import QObject, pyqtSignal
 try:
     import winreg
 except ImportError:
     winreg = None
+
+APP_VERSION = "2.0.2.2"
 
 APP_DIR = Path(os.environ.get("APPDATA", ".")) / "ProcessX"
 APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -19,6 +22,8 @@ DEFAULT_SETTINGS = {
     "run_on_startup": False,
     "minimize_to_tray": True,
     "refresh_interval_ms": 2500,
+    "auto_check_update": "startup",
+    "last_update_check": 0,
 }
 
 _PRIORITY_CLASSES = {
@@ -94,6 +99,19 @@ TRANSLATIONS = {
         "settings_tray_desc": "Đóng cửa sổ sẽ ẩn ứng dụng xuống khay hệ thống để tiếp tục áp dụng quy tắc.",
         "settings_lang_label": "Ngôn ngữ hiển thị",
         "settings_lang_desc": "Chọn ngôn ngữ giao diện (Tiếng Việt / English).",
+        "settings_update_label": "Tự động kiểm tra cập nhật",
+        "settings_update_desc": "Tự động kiểm tra phiên bản mới trên GitHub.",
+        "settings_update_opt_off": "Tắt (OFF)",
+        "settings_update_opt_startup": "Khi mở ứng dụng",
+        "settings_update_opt_2weeks": "2 tuần một lần",
+        "settings_update_opt_1month": "1 tháng một lần",
+        "update_dlg_title": "Cập nhật ProcessX",
+        "update_dlg_new_ver": "Đã có phiên bản mới: {version}",
+        "update_dlg_subtitle": "Một phiên bản mới của ProcessX đã sẵn sàng để tải về.",
+        "update_dlg_notes_title": "NỘI DUNG CẬP NHẬT (RELEASE NOTES)",
+        "update_dlg_no_notes": "Không có thông tin chi tiết cho bản phát hành này.",
+        "update_dlg_btn_update": "Cập nhật",
+        "update_dlg_btn_later": "Để sau",
         "settings_btn_close": "Đóng",
         "settings_status_saved": "Đã lưu cài đặt",
         "col_proc_name": "TÊN TIẾN TRÌNH",
@@ -236,6 +254,19 @@ TRANSLATIONS = {
         "settings_tray_desc": "Closing window minimizes to tray to keep rules and watcher active.",
         "settings_lang_label": "Display Language",
         "settings_lang_desc": "Select user interface language (Tiếng Việt / English).",
+        "settings_update_label": "Auto Check Update",
+        "settings_update_desc": "Automatically check for new versions on GitHub.",
+        "settings_update_opt_off": "Off",
+        "settings_update_opt_startup": "On App Startup",
+        "settings_update_opt_2weeks": "Every 2 Weeks",
+        "settings_update_opt_1month": "Every Month",
+        "update_dlg_title": "ProcessX Update",
+        "update_dlg_new_ver": "New Version Available: {version}",
+        "update_dlg_subtitle": "A new version of ProcessX is available for download.",
+        "update_dlg_notes_title": "RELEASE NOTES",
+        "update_dlg_no_notes": "No release notes provided for this release.",
+        "update_dlg_btn_update": "Update",
+        "update_dlg_btn_later": "Later",
         "settings_btn_close": "Close",
         "settings_status_saved": "Settings saved",
         "col_proc_name": "PROCESS NAME",
@@ -399,8 +430,60 @@ def get_setting(key: str, default=None):
 
 def set_setting(key: str, value):
     settings = load_settings()
-    settings[key] = value
+    if value is None:
+        settings.pop(key, None)
+    else:
+        settings[key] = value
     save_settings(settings)
+
+
+def _log_migration(message: str):
+    try:
+        log_path = APP_DIR / "processx.log"
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"[{now}] [MIGRATION] {message}\n")
+    except Exception:
+        pass
+
+
+def migrate_rules(data: dict) -> tuple[dict, bool]:
+    if not isinstance(data, dict):
+        return {}, False
+    migrated = {}
+    dropped_keys = []
+    changed = False
+
+    for old_key, rule in data.items():
+        if not isinstance(rule, dict):
+            changed = True
+            continue
+
+        raw_name = rule.get("name") or os.path.basename(rule.get("exe_path") or old_key)
+        new_key = os.path.basename(raw_name).strip().lower()
+        if not new_key:
+            new_key = str(old_key).strip().lower()
+
+        if new_key in migrated:
+            dropped_keys.append(str(old_key))
+            changed = True
+            continue
+
+        if old_key != new_key:
+            changed = True
+
+        new_rule = dict(rule)
+        if "exe_path" in new_rule:
+            del new_rule["exe_path"]
+            changed = True
+
+        new_rule["name"] = rule.get("name") or new_key
+        migrated[new_key] = new_rule
+
+    if dropped_keys:
+        _log_migration(f"Dropped duplicate rule keys: {', '.join(dropped_keys)}")
+
+    return migrated, changed
 
 
 def load_rules() -> dict:
@@ -408,7 +491,10 @@ def load_rules() -> dict:
         try:
             data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                return data
+                migrated, changed = migrate_rules(data)
+                if changed:
+                    save_rules(migrated)
+                return migrated
         except (json.JSONDecodeError, OSError):
             corrupt = RULES_FILE.with_suffix(".json.corrupt")
             try:
@@ -436,6 +522,7 @@ def validate_rules(data) -> tuple[dict, list[str]]:
         raise ValueError("Rules data must be a dictionary")
     cleaned = {}
     warnings = []
+    dropped_keys = []
     for exe, rule in data.items():
         if not isinstance(exe, str) or not exe.strip():
             warnings.append(f"Skipped invalid process target: {exe!r}")
@@ -471,12 +558,23 @@ def validate_rules(data) -> tuple[dict, list[str]]:
             clean["power_plan"] = rule["power_plan"].strip()
         if "ecoqos" in rule:
             clean["ecoqos"] = bool(rule["ecoqos"])
-        if "exe_path" in rule and isinstance(rule["exe_path"], str):
-            clean["exe_path"] = rule["exe_path"]
 
-        clean["name"] = rule.get("name") or os.path.basename(clean.get("exe_path") or exe)
+        raw_name = rule.get("name") or os.path.basename(rule.get("exe_path") or exe)
+        exe_name = os.path.basename(raw_name).strip()
+        if not exe_name:
+            exe_name = exe.strip()
+        key = exe_name.lower()
+
+        clean["name"] = exe_name
         if clean:
-            cleaned[exe.lower()] = clean
+            if key in cleaned:
+                dropped_keys.append(exe)
+                warnings.append(f"Dropped duplicate rule key {exe!r} collapsing to {key!r}")
+            else:
+                cleaned[key] = clean
+
+    if dropped_keys:
+        _log_migration(f"Dropped duplicate rule keys: {', '.join(dropped_keys)}")
 
     return cleaned, warnings
 
@@ -627,4 +725,47 @@ def translate_val(val: str, category: str = "") -> str:
             return tr("mem_normal")
     key = _VALUE_TRANSLATION_MAP.get(val)
     return tr(key) if key else val
+
+
+def parse_version_tuple(tag: str) -> tuple[int, ...]:
+    if not tag:
+        return (0,)
+    clean = tag.strip().lstrip("vV")
+    parts = []
+    for p in clean.split("."):
+        digits = "".join(c for c in p if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts) if parts else (0,)
+
+
+def is_version_newer(remote: str | tuple[int, ...], current: str | tuple[int, ...]) -> bool:
+    r_tup = parse_version_tuple(remote) if isinstance(remote, str) else remote
+    c_tup = parse_version_tuple(current) if isinstance(current, str) else current
+    max_len = max(len(r_tup), len(c_tup))
+    r_padded = r_tup + (0,) * (max_len - len(r_tup))
+    c_padded = c_tup + (0,) * (max_len - len(c_tup))
+    return r_padded > c_padded
+
+
+def should_check_for_updates() -> bool:
+    mode = get_setting("auto_check_update", "startup")
+    if mode == "off":
+        return False
+    if mode == "startup":
+        return True
+
+    try:
+        last_check = float(get_setting("last_update_check", 0) or 0)
+    except (ValueError, TypeError):
+        last_check = 0.0
+    now = time.time()
+    elapsed = now - last_check
+
+    if mode == "2weeks":
+        return elapsed >= 1209600
+    if mode == "1month":
+        return elapsed >= 2592000
+
+    return True
+
 

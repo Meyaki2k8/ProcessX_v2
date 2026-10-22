@@ -2,11 +2,14 @@ import ctypes
 import ctypes.wintypes
 import json
 import os
+import psutil
 import subprocess
 import sys
 import threading    
 import time
 import traceback
+import urllib.request
+import webbrowser
 from collections import OrderedDict
 from pathlib import Path
 
@@ -24,6 +27,7 @@ from PyQt6.QtCore import (
     Qt,
     QThread,
     QTimer,
+    QUrl,
     pyqtProperty,
     pyqtSignal,
 )
@@ -31,6 +35,7 @@ from PyQt6.QtGui import (
     QBrush,
     QColor,
     QCursor,
+    QDesktopServices,
     QFont,
     QFontMetrics,
     QIcon,
@@ -72,6 +77,7 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -80,6 +86,7 @@ from PyQt6.QtWidgets import (
 
 from config import (
     APP_DIR,
+    APP_VERSION,
     IO_PRIORITY_NAMES,
     PRIORITY_MAP,
     I18N,
@@ -87,9 +94,12 @@ from config import (
     get_setting,
     import_rules_from_file,
     is_critical_process,
+    is_version_newer,
     load_rules,
+    parse_version_tuple,
     save_rules,
     set_setting,
+    should_check_for_updates,
     tr,
     translate_val,
     validate_rules,
@@ -109,10 +119,10 @@ from core import (
     format_affinity_str,
     get_proc_exe,
     get_running_pids,
+    get_live_active_profile_pids,
     is_in_startup,
     kill_process,
     list_power_plans,
-    normalize_exe_path,
     remove_from_startup,
     save_and_apply_rule,
     set_dwm_corner_preference,
@@ -1717,7 +1727,7 @@ class LanguageToggle(QFrame):
 class CustomTitleBar(QWidget):
     search_changed = pyqtSignal(str)
 
-    def __init__(self, parent_window, title: str = "ProcessX", version: str = "v2.0.2.1"):
+    def __init__(self, parent_window, title: str = "ProcessX", version: str = f"v{APP_VERSION}"):
         super().__init__(parent_window)
         self.parent_window = parent_window
         self.setObjectName("TitleBar")
@@ -2753,6 +2763,157 @@ class AddRuleDialog(FramelessDialog):
     _accept_file = _on_ok
 
 
+class UpdateNotificationDialog(FramelessDialog):
+    """
+    Dialog to notify the user when a newer version of ProcessX is available on GitHub.
+    """
+    def __init__(self, parent=None, release_info: dict = None):
+        super().__init__(parent, title=tr("update_dlg_title"))
+        self.release_info = release_info or {}
+        self.tag_name = self.release_info.get("tag_name", "")
+        self.html_url = self.release_info.get("html_url") or "https://github.com/Meyaki2k8/ProcessX_v2/releases/latest"
+        self.body_text = self.release_info.get("body", "") or ""
+        self.release_name = self.release_info.get("name") or self.tag_name
+
+        self.setMinimumSize(540, 420)
+        self.resize(540, 420)
+
+        self._build_ui()
+        I18N.language_changed.connect(self.retranslate_ui)
+        self.retranslate_ui(I18N.current_language)
+
+    def _build_ui(self):
+        root_layout = self.body_layout
+        root_layout.setContentsMargins(20, 12, 20, 18)
+        root_layout.setSpacing(12)
+
+        # ── Header Banner Card
+        top_card = QFrame(self)
+        top_card.setObjectName("GlassCard")
+        top_card.setStyleSheet(
+            f"#GlassCard {{"
+            f"  background-color: {SURFACE_CARD};"
+            f"  border: 1px solid {BORDER_BLUE};"
+            f"  border-radius: 8px;"
+            f"}}"
+        )
+        top_layout = QVBoxLayout(top_card)
+        top_layout.setContentsMargins(16, 12, 16, 12)
+        top_layout.setSpacing(4)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+
+        self.lbl_headline = QLabel(self)
+        self.lbl_headline.setStyleSheet(f"font-size: 14px; font-weight: 700; color: {TEXT_PRIMARY};")
+        header_row.addWidget(self.lbl_headline)
+        header_row.addStretch()
+
+        if self.tag_name:
+            tag_badge = QLabel(self.tag_name, self)
+            tag_badge.setObjectName("VersionBadge")
+            tag_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            tag_badge.setFixedHeight(20)
+            tag_badge.setStyleSheet(
+                f"background-color: {ACCENT_BLUE_DIM};"
+                f"border: 1px solid {BORDER_BLUE};"
+                f"border-radius: 4px;"
+                f"color: {ACCENT_BLUE_HOVER};"
+                f"font-size: 11px;"
+                f"font-weight: 700;"
+                f"padding: 0 8px;"
+            )
+            header_row.addWidget(tag_badge)
+
+        top_layout.addLayout(header_row)
+
+        self.lbl_subheadline = QLabel(self)
+        self.lbl_subheadline.setStyleSheet(f"font-size: 11px; color: {TEXT_SECONDARY};")
+        self.lbl_subheadline.setWordWrap(True)
+        top_layout.addWidget(self.lbl_subheadline)
+
+        root_layout.addWidget(top_card)
+
+        # ── Release Notes Section Heading
+        self.lbl_notes_header = QLabel(self)
+        self.lbl_notes_header.setStyleSheet("font-size: 11px; font-weight: 700; color: #94A3B8; letter-spacing: 0.5px;")
+        root_layout.addWidget(self.lbl_notes_header)
+
+        # ── Release Notes Box (Scrollable QTextEdit)
+        self.txt_notes = QTextEdit(self)
+        self.txt_notes.setReadOnly(True)
+        self.txt_notes.setStyleSheet(
+            f"QTextEdit {{"
+            f"  background-color: rgba(14, 16, 22, 0.75);"
+            f"  border: 1px solid {BORDER_SUBTLE};"
+            f"  border-radius: 6px;"
+            f"  padding: 10px 12px;"
+            f"  color: {TEXT_PRIMARY};"
+            f"  font-size: 12px;"
+            f"}}"
+        )
+        self._update_notes_content()
+        root_layout.addWidget(self.txt_notes, 1)
+
+        # ── Bottom Action Bar
+        btn_bar = QHBoxLayout()
+        btn_bar.setSpacing(10)
+        btn_bar.addStretch()
+
+        self.btn_later = QPushButton(self)
+        self.btn_later.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_later.setFixedWidth(100)
+        self.btn_later.clicked.connect(self.reject)
+        btn_bar.addWidget(self.btn_later)
+
+        self.btn_update = QPushButton(self)
+        self.btn_update.setObjectName("AccentBtn")
+        self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_update.setFixedWidth(130)
+        self.btn_update.clicked.connect(self._on_update_clicked)
+        btn_bar.addWidget(self.btn_update)
+
+        root_layout.addLayout(btn_bar)
+
+    def _update_notes_content(self):
+        notes = (self.body_text or "").strip()
+        if not notes:
+            self.txt_notes.setPlainText(tr("update_dlg_no_notes"))
+        else:
+            if len(notes) > 3000:
+                notes = notes[:3000].rstrip() + "\n\n*(Full changelog available on GitHub)*"
+            try:
+                self.txt_notes.setMarkdown(notes)
+            except Exception:
+                self.txt_notes.setPlainText(notes)
+
+    def _on_update_clicked(self):
+        url_target = self.html_url or "https://github.com/Meyaki2k8/ProcessX_v2/releases/latest"
+        opened = False
+        try:
+            opened = QDesktopServices.openUrl(QUrl(url_target))
+        except Exception:
+            opened = False
+        if not opened:
+            try:
+                webbrowser.open(url_target)
+            except Exception:
+                pass
+        self.accept()
+
+    def retranslate_ui(self, lang: str = None):
+        if not lang:
+            lang = I18N.current_language
+        self.setWindowTitle(tr("update_dlg_title"))
+        self.lbl_headline.setText(tr("update_dlg_new_ver", version=self.tag_name))
+        self.lbl_subheadline.setText(tr("update_dlg_subtitle"))
+        self.lbl_notes_header.setText(tr("update_dlg_notes_title"))
+        self.btn_later.setText(tr("update_dlg_btn_later"))
+        self.btn_update.setText(tr("update_dlg_btn_update"))
+        if not (self.body_text or "").strip():
+            self.txt_notes.setPlainText(tr("update_dlg_no_notes"))
+
+
 class SettingsDialog(FramelessDialog):
     """
     Modern glassmorphic settings modal dialog.
@@ -2762,8 +2923,8 @@ class SettingsDialog(FramelessDialog):
     def __init__(self, parent=None):
         super().__init__(parent, title=tr("settings_title"))
         self.parent_app = parent
-        self.setMinimumSize(620, 410)
-        self.resize(620, 410)
+        self.setMinimumSize(620, 480)
+        self.resize(620, 480)
 
         self._build_ui()
         I18N.language_changed.connect(self.retranslate_ui)
@@ -2873,6 +3034,37 @@ class SettingsDialog(FramelessDialog):
         row_lang.addWidget(self.combo_lang)
         c_layout.addLayout(row_lang)
 
+        # Separator
+        sep3 = QFrame(card)
+        sep3.setFixedHeight(1)
+        sep3.setStyleSheet(f"background-color: {BORDER_SUBTLE};")
+        c_layout.addWidget(sep3)
+
+        # 4. Auto Check Update
+        row_update = QHBoxLayout()
+        row_update.setSpacing(14)
+
+        info_update = QVBoxLayout()
+        info_update.setSpacing(2)
+        self.lbl_update_title = QLabel(tr("settings_update_label"), card)
+        self.lbl_update_title.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {TEXT_PRIMARY};")
+        info_update.addWidget(self.lbl_update_title)
+
+        self.lbl_update_desc = QLabel(tr("settings_update_desc"), card)
+        self.lbl_update_desc.setStyleSheet(f"font-size: 11px; color: {TEXT_SECONDARY};")
+        self.lbl_update_desc.setWordWrap(True)
+        info_update.addWidget(self.lbl_update_desc)
+        row_update.addLayout(info_update, 1)
+
+        self.combo_update = NoScrollComboBox(card)
+        self.combo_update.setMinimumWidth(260)
+        self.combo_update.view().setMinimumWidth(260)
+        self.combo_update.view().setTextElideMode(Qt.TextElideMode.ElideNone)
+        self._populate_update_combo()
+        self.combo_update.currentIndexChanged.connect(self._on_update_mode_changed)
+        row_update.addWidget(self.combo_update)
+        c_layout.addLayout(row_update)
+
         root_layout.addWidget(card)
 
         # Status feedback label
@@ -2893,6 +3085,30 @@ class SettingsDialog(FramelessDialog):
         btn_bar.addWidget(self.btn_close)
 
         root_layout.addLayout(btn_bar)
+
+    def _populate_update_combo(self):
+        curr_mode = self.combo_update.currentData() if hasattr(self, "combo_update") else None
+        if not curr_mode:
+            curr_mode = get_setting("auto_check_update", "startup")
+        self.combo_update.blockSignals(True)
+        self.combo_update.clear()
+        self.combo_update.addItem(tr("settings_update_opt_off"), "off")
+        self.combo_update.addItem(tr("settings_update_opt_startup"), "startup")
+        self.combo_update.addItem(tr("settings_update_opt_2weeks"), "2weeks")
+        self.combo_update.addItem(tr("settings_update_opt_1month"), "1month")
+        idx = self.combo_update.findData(curr_mode)
+        if idx >= 0:
+            self.combo_update.setCurrentIndex(idx)
+        else:
+            self.combo_update.setCurrentIndex(1)
+        self.combo_update.blockSignals(False)
+
+    def _on_update_mode_changed(self, index: int):
+        mode = self.combo_update.itemData(index)
+        if mode:
+            set_setting("auto_check_update", mode)
+            self.lbl_status.setText(tr("settings_status_saved"))
+            self.settings_changed.emit()
 
     def _on_startup_toggled(self, checked: bool):
         if checked:
@@ -2928,6 +3144,9 @@ class SettingsDialog(FramelessDialog):
         self.lbl_tray_desc.setText(tr("settings_tray_desc"))
         self.lbl_lang_title.setText(tr("settings_lang_label"))
         self.lbl_lang_desc.setText(tr("settings_lang_desc"))
+        self.lbl_update_title.setText(tr("settings_update_label"))
+        self.lbl_update_desc.setText(tr("settings_update_desc"))
+        self._populate_update_combo()
         self.btn_close.setText(tr("settings_btn_close"))
         if self.lbl_status.text():
             self.lbl_status.setText(tr("settings_status_saved"))
@@ -2958,6 +3177,13 @@ class ProfilesManagerDialog(FramelessDialog):
         self.populate_table()
 
         I18N.language_changed.connect(self.retranslate_ui)
+        self.finished.connect(self._on_dialog_finished)
+
+    def _on_dialog_finished(self, code: int = 0):
+        try:
+            I18N.language_changed.disconnect(self.retranslate_ui)
+        except Exception:
+            pass
 
     def _build_ui(self):
         root_layout = self.body_layout
@@ -3038,7 +3264,7 @@ class ProfilesManagerDialog(FramelessDialog):
         btn_bar.addStretch()
 
         self.btn_close = QPushButton(tr("pm_btn_close"), self)
-        self.btn_close.clicked.connect(self.close)
+        self.btn_close.clicked.connect(self.reject)
         btn_bar.addWidget(self.btn_close)
 
         root_layout.addLayout(btn_bar)
@@ -3069,17 +3295,22 @@ class ProfilesManagerDialog(FramelessDialog):
     sync_i18n = retranslate_ui
 
     def populate_table(self):
-        running = get_running_pids(self.rules)
+        running = {}
+        if hasattr(self.parent_app, "get_active_rule_pids"):
+            running = self.parent_app.get_active_rule_pids()
+        if not running:
+            running = get_running_pids(self.rules)
+
+        running_keys_lower = {k.lower(): pid for k, pid in running.items()}
+        running_exes_lower = {os.path.basename(k).lower(): pid for k, pid in running.items()}
         plan_name_by_guid = {guid.lower(): name for name, guid, _active in list_power_plans()}
 
         query = self.search_input.text().strip().lower()
 
         rows = []
         for rk, rule in self.rules.items():
-            exe_name = rule.get("name") or os.path.basename(rule.get("exe_path") or rk)
+            exe_name = rule.get("name") or os.path.basename(rk)
             disp_label = exe_name
-            if rule.get("exe_path"):
-                disp_label = f"{exe_name} ({rule['exe_path']})"
 
             if query and query not in disp_label.lower():
                 continue
@@ -3104,10 +3335,18 @@ class ProfilesManagerDialog(FramelessDialog):
 
             pp_guid = rule.get("power_plan")
             pp_name = plan_name_by_guid.get(pp_guid.lower(), pp_guid) if pp_guid else tr("val_none")
-            is_running = (rk in running)
+
+            rk_lower = rk.lower().strip()
+            exe_lower = exe_name.lower().strip()
+            is_running = (
+                rk in running
+                or rk_lower in running_keys_lower
+                or exe_lower in running_exes_lower
+            )
             status = tr("pm_status_running") if is_running else tr("pm_status_stopped")
 
-            rows.append((rk, exe_name, disp_label, pri_name, io_name, aff_str, pp_name, status, is_running))
+            active_pid = running.get(rk) or running_keys_lower.get(rk_lower) or running_exes_lower.get(exe_lower)
+            rows.append((rk, exe_name, disp_label, pri_name, io_name, aff_str, pp_name, status, is_running, active_pid))
 
         rows.sort(key=lambda x: x[1].lower())
 
@@ -3128,10 +3367,11 @@ class ProfilesManagerDialog(FramelessDialog):
 
         self.table.setRowCount(len(rows))
 
-        for row_idx, (rk, exe_name, disp_label, pri, io_name, aff_str, pp_name, status, is_running) in enumerate(rows):
+        for row_idx, (rk, exe_name, disp_label, pri, io_name, aff_str, pp_name, status, is_running, active_pid) in enumerate(rows):
             item_name = QTableWidgetItem(disp_label)
             item_name.setData(Qt.ItemDataRole.UserRole, rk)
-            item_name.setIcon(resolve_process_icon(exe_name, self.rules.get(rk, {}).get("exe_path"), 16))
+            icon_path = find_exe_path(exe_name, pid=active_pid)
+            item_name.setIcon(resolve_process_icon(exe_name, icon_path, 16))
             self.table.setItem(row_idx, 0, item_name)
 
             item_pri = QTableWidgetItem(pri)
@@ -3158,6 +3398,82 @@ class ProfilesManagerDialog(FramelessDialog):
 
     populate = populate_table
 
+    def update_profile_status(self, rule_key: str, is_running: bool):
+        """
+        Updates the STATUS column for the row corresponding to rule_key without reloading the table.
+        Prevents table flickering and preserves current row selection.
+        """
+        if not self.isVisible():
+            return
+
+        rk_lower = rule_key.lower().strip()
+        exe_lower = os.path.basename(rule_key).lower().strip()
+
+        status_text = tr("pm_status_running") if is_running else tr("pm_status_stopped")
+        status_color = QColor(ACCENT_BLUE if is_running else COLOR_WAITING)
+
+        for row in range(self.table.rowCount()):
+            item_name = self.table.item(row, 0)
+            if not item_name:
+                continue
+            row_rk = item_name.data(Qt.ItemDataRole.UserRole)
+            row_text = item_name.text().lower().strip()
+
+            match = False
+            if row_rk:
+                row_rk_lower = str(row_rk).lower().strip()
+                if row_rk_lower == rk_lower or os.path.basename(row_rk_lower) == exe_lower:
+                    match = True
+            if not match and row_text == exe_lower:
+                match = True
+
+            if match:
+                item_status = self.table.item(row, 5)
+                if not item_status:
+                    item_status = QTableWidgetItem()
+                    item_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table.setItem(row, 5, item_status)
+                if item_status.text() != status_text:
+                    item_status.setText(status_text)
+                    item_status.setForeground(status_color)
+                break
+
+    def sync_active_profiles(self, running: dict):
+        """
+        Reconciles all rows in table with running dict without rebuilding table.
+        Only updates rows whose status actually changed.
+        """
+        if not self.isVisible():
+            return
+
+        running_keys_lower = {k.lower(): pid for k, pid in running.items()}
+        running_exes_lower = {os.path.basename(k).lower(): pid for k, pid in running.items()}
+        blue_color = QColor(ACCENT_BLUE)
+        muted_color = QColor(COLOR_WAITING)
+
+        for row in range(self.table.rowCount()):
+            item_name = self.table.item(row, 0)
+            if not item_name:
+                continue
+            row_rk = item_name.data(Qt.ItemDataRole.UserRole)
+            if not row_rk:
+                continue
+            rk_lower = str(row_rk).lower().strip()
+            exe_lower = os.path.basename(rk_lower)
+            row_text = item_name.text().lower().strip()
+
+            is_running = (
+                row_rk in running
+                or rk_lower in running_keys_lower
+                or exe_lower in running_exes_lower
+                or row_text in running_exes_lower
+            )
+            expected_text = tr("pm_status_running") if is_running else tr("pm_status_stopped")
+            item_status = self.table.item(row, 5)
+            if item_status and item_status.text() != expected_text:
+                item_status.setText(expected_text)
+                item_status.setForeground(blue_color if is_running else muted_color)
+
     def _on_search_changed(self):
         self.populate_table()
 
@@ -3169,10 +3485,11 @@ class ProfilesManagerDialog(FramelessDialog):
         rk = rk_item.data(Qt.ItemDataRole.UserRole)
         if rk and rk in self.rules:
             r = self.rules[rk]
-            exe_name = r.get("name") or os.path.basename(r.get("exe_path") or rk)
+            exe_name = r.get("name") or os.path.basename(rk)
+            path_hint = find_exe_path(exe_name)
             dlg = RuleEditorDialog(
                 self, proc_name=exe_name, rules=self.rules,
-                rule_key=rk, path_hint=r.get("exe_path")
+                rule_key=rk, path_hint=path_hint
             )
             dlg.rule_saved.connect(self._on_rule_updated)
             dlg.rule_deleted.connect(self._on_rule_updated)
@@ -3297,20 +3614,17 @@ class RuleEditorDialog(FramelessDialog):
         self.existing = {}
         if self.rule_key and self.rule_key in self.rules:
             self.existing = self.rules[self.rule_key]
-            if not self.path_hint:
-                self.path_hint = self.existing.get("exe_path")
         else:
             rk, r = find_rule_for_process(self.pid, self.rules, name=self.proc_name, exe_path=self.path_hint)
             if r:
                 self.existing = r
                 self.rule_key = rk
-                if not self.path_hint:
-                    self.path_hint = self.existing.get("exe_path")
             elif proc_name.lower() in self.rules:
                 self.existing = self.rules[proc_name.lower()]
                 self.rule_key = proc_name.lower()
-                if not self.path_hint:
-                    self.path_hint = self.existing.get("exe_path")
+
+        if not self.path_hint:
+            self.path_hint = find_exe_path(self.proc_name, pid=self.pid)
 
         # Responsive geometry: dynamically adapts to screen resolution and DPI scale
         screen = QApplication.primaryScreen()
@@ -3737,14 +4051,11 @@ class RuleEditorDialog(FramelessDialog):
             "affinity": aff,
         }
 
-        if self.path_hint and os.path.isfile(self.path_hint):
-            rule["exe_path"] = self.path_hint
-
         pp_guid = self.pp_combo.currentData()
         if pp_guid:
             rule["power_plan"] = pp_guid
 
-        target_key = self.rule_key or self.proc_name
+        target_key = os.path.basename(self.rule_key or self.proc_name).lower().strip()
         instance_ct, any_failed, all_msgs = save_and_apply_rule(
             self.rules, target_key, rule,
             pid=self.pid, path_hint=self.path_hint, auto_apply=True
@@ -3766,7 +4077,7 @@ class RuleEditorDialog(FramelessDialog):
         if confirm != QMessageBox.StandardButton.Yes:
             return
 
-        target_key = self.rule_key or self.proc_name
+        target_key = os.path.basename(self.rule_key or self.proc_name).lower().strip()
         delete_rule(self.rules, target_key)
         self.rule_deleted.emit()
         self.close()
@@ -3774,7 +4085,35 @@ class RuleEditorDialog(FramelessDialog):
     _delete_profile = _delete_rule
 
 
-# Background Worker Thread
+# Background Worker Threads
+class UpdateCheckWorker(QThread):
+    """
+    Background worker thread that queries GitHub Releases API for the latest release.
+    """
+    update_available = pyqtSignal(dict)
+
+    def __init__(self, current_version: str = APP_VERSION, parent=None):
+        super().__init__(parent)
+        self.current_version = current_version
+
+    def run(self):
+        try:
+            req = urllib.request.Request(
+                "https://api.github.com/repos/Meyaki2k8/ProcessX_v2/releases/latest",
+                headers={"User-Agent": "ProcessX-v2"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    raw = resp.read().decode("utf-8")
+                    data = json.loads(raw)
+                    set_setting("last_update_check", int(time.time()))
+                    tag = data.get("tag_name", "")
+                    if tag and is_version_newer(tag, self.current_version):
+                        self.update_available.emit(data)
+        except Exception:
+            pass
+
+
 class ProcessSnapshotWorker(QThread):
     snapshot_ready = pyqtSignal(list)
 
@@ -3794,6 +4133,7 @@ class _WatcherBridge(QObject):
     """Thread-safe signal dispatcher from background RuleWatcher thread to Qt Main UI thread."""
     status_changed = pyqtSignal(str)
     refresh_requested = pyqtSignal()
+    profile_status_changed = pyqtSignal(str, bool)
 
 
 # Main Window
@@ -3828,7 +4168,7 @@ class ProcessX(QMainWindow):
         self.root_layout.setContentsMargins(0, 0, 0, 0)
         self.root_layout.setSpacing(0)
 
-        self.title_bar = CustomTitleBar(self, title="ProcessX", version="v2.0.2.1")
+        self.title_bar = CustomTitleBar(self, title="ProcessX", version=f"v{APP_VERSION}")
         self.title_bar.search_changed.connect(self._on_search)
         self.root_layout.addWidget(self.title_bar)
 
@@ -3857,6 +4197,9 @@ class ProcessX(QMainWindow):
         # System Tray
         self._setup_tray()
 
+        # Active dialog tracking for real-time status updates
+        self._active_profiles_dialog = None
+
         # Snapshot Worker
         self.worker = ProcessSnapshotWorker(lambda: self.rules, self)
         self.worker.snapshot_ready.connect(self._on_snapshot_ready)
@@ -3872,6 +4215,7 @@ class ProcessX(QMainWindow):
             lambda: self.rules,
             status_cb=self._watcher_bridge.status_changed.emit,
             refresh_cb=self._watcher_bridge.refresh_requested.emit,
+            profile_status_cb=self._watcher_bridge.profile_status_changed.emit,
         )
         self.watcher.start()
 
@@ -3885,12 +4229,37 @@ class ProcessX(QMainWindow):
         self._apply_state_styling(False)
         self.trigger_refresh()
 
+        # Automatic update check on startup
+        self._update_worker = None
+        QTimer.singleShot(1500, self._check_for_updates_on_startup)
+
+    def _check_for_updates_on_startup(self):
+        if self._quitting or not should_check_for_updates():
+            return
+        self._update_worker = UpdateCheckWorker(current_version=APP_VERSION, parent=self)
+        self._update_worker.update_available.connect(self._show_update_dialog)
+        self._update_worker.start()
+
+    def _show_update_dialog(self, release_info: dict):
+        if self._quitting:
+            return
+        dlg = UpdateNotificationDialog(self, release_info=release_info)
+        dlg.exec()
+
     def _on_watcher_status(self, msg: str):
         if hasattr(self, "status_bar"):
-            self.status_bar.setText(msg)
-        is_active = ("active" in msg.lower() or "monitoring" in msg.lower() or "running" in msg.lower())
+            if msg:
+                self.status_bar.setText(msg)
+            else:
+                self.status_bar.setText(tr("status_watcher_running"))
         if hasattr(self, "toolbar"):
-            self.toolbar.set_watcher_status(is_active, msg)
+            if not msg:
+                self.toolbar.set_watcher_status(True, None)
+            else:
+                self.toolbar.set_watcher_status(True, msg)
+
+    def get_active_rule_pids(self) -> dict[str, int]:
+        return get_live_active_profile_pids(self.rules, getattr(self, "watcher", None))
 
     def _retranslate_ui(self, lang: str = ""):
         if hasattr(self, "status_bar"):
@@ -4065,6 +4434,11 @@ class ProcessX(QMainWindow):
 
     def quit_app(self):
         self._quitting = True
+        if hasattr(self, "_update_worker") and self._update_worker and self._update_worker.isRunning():
+            try:
+                self._update_worker.terminate()
+            except Exception:
+                pass
         self.refresh_timer.stop()
         self.watcher.stop()
         if hasattr(self, "tray"):
@@ -4194,9 +4568,13 @@ class ProcessX(QMainWindow):
                 return
             self.tree.update_snapshot(snapshot)
             self.rules = load_rules()
-            running = get_running_pids(self.rules)
+            running = self.get_active_rule_pids()
             active_cnt = min(len(running), len(self.rules))
             self.toolbar.update_metrics(active_cnt, len(self.rules), len(snapshot))
+            if active_cnt == 0 and self.toolbar._watcher_text and "auto-applied" in str(self.toolbar._watcher_text).lower():
+                self._on_watcher_status("")
+            if self._active_profiles_dialog and self._active_profiles_dialog.isVisible():
+                self._active_profiles_dialog.sync_active_profiles(running)
         except Exception as e:
             _log_error("ProcessX._on_snapshot_ready", e)
 
@@ -4209,9 +4587,32 @@ class ProcessX(QMainWindow):
         self.trigger_refresh()
 
     def _open_profiles(self):
+        if hasattr(self, "_active_profiles_dialog") and self._active_profiles_dialog:
+            try:
+                if self._active_profiles_dialog.isVisible():
+                    self._active_profiles_dialog.raise_()
+                    self._active_profiles_dialog.activateWindow()
+                    return
+            except (RuntimeError, Exception):
+                self._active_profiles_dialog = None
+
         dlg = ProfilesManagerDialog(self, self.rules)
         dlg.rules_modified.connect(self._on_rules_changed)
-        dlg.exec()
+        self._watcher_bridge.profile_status_changed.connect(dlg.update_profile_status)
+        self._active_profiles_dialog = dlg
+
+        def _cleanup(*_args):
+            self._active_profiles_dialog = None
+            try:
+                self._watcher_bridge.profile_status_changed.disconnect(dlg.update_profile_status)
+            except Exception:
+                pass
+
+        dlg.finished.connect(_cleanup)
+        try:
+            dlg.exec()
+        finally:
+            _cleanup()
 
     def _open_add_rule(self):
         dlg = AddRuleDialog(self)
